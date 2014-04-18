@@ -17,6 +17,7 @@ John Xia <john.danger.xia@gmail.com>.
 from __future__ import print_function, division, unicode_literals
 import re
 import os
+from collections import OrderedDict
 from libc.stdlib cimport malloc, free
 
 cimport numpy as np
@@ -38,6 +39,10 @@ libraries = {0: "ENDF/B", 1: "ENDF/A", 2: "JEFF", 3: "EFF",
              4: "ENDF/B High Energy", 5: "CENDL", 6: "JENDL",
              31: "INDL/V", 32: "INDL/A", 33: "FENDL", 34: "IRDF",
              35: "BROND", 36: "INGDB-90", 37: "FENDL/A", 41: "BROND"}
+radiation_type = {0: 'gamma', 1: 'beta-', 2: 'ec/beta+', 3: 'IT',
+                  4: 'alpha', 5: 'neutron', 6: 'sf', 7: 'proton',
+                  8: 'e-', 9: 'xray', 10: 'unknown'}
+resonance_types = {1: 'SLBW', 2: 'MLBW', 3: 'RM', 4: 'AA', 7: 'RML'}
 FILE1_R = re.compile(r'1451 *\d{1,5}$')
 CONTENTS_R = re.compile(' +\d{1,2} +\d{1,3} +\d{1,10} +')
 SPACE66_R = re.compile(' {66}')
@@ -986,11 +991,29 @@ class Evaluation(object):
     of Files.
     """
 
-    def __init__(self, filename, verbose=True):
-        self.fh = open(filename, 'r')
+    def __init__(self, filename_or_handle, verbose=True):
+        if isinstance(filename_or_handle, file):
+            self._fh = filename_or_handle
+        else:
+            self._fh = open(filename_or_handle, 'r')
         self.files = []
-        self.verbose = verbose
-        self.veryverbose = False
+        self._verbose = verbose
+        self._veryverbose = False
+
+        # Determine MAT number for this evaluation
+        MF = 0
+        while MF == 0:
+            position = self._fh.tell()
+            line = self._fh.readline()
+            MF = int(line[70:72])
+        self.material = int(line[66:70])
+
+        # Save starting position for this evaluation
+        self._start_position = position
+        self._fh.seek(position)
+
+        # Create list for reactions
+        self.reactions = OrderedDict()
 
         # First we need to read MT=1, MT=451 which has a description of the ENDF
         # file and a list of what data exists in the file
@@ -998,27 +1021,22 @@ class Evaluation(object):
 
     def read(self, reactions=None):
         if not reactions:
-            if self.verbose:
+            if self._verbose:
                 print("No reaction given. Read all")
             reactions = []
-            for r in self.reactionList[1:]:
+            for r in self.reaction_list[1:]:
                 reactions.append(r[0:2])
         if isinstance(reactions, tuple):
             reactions = [reactions]
-        # Start looping over the requested reactions
-        # entry since it is the MT=451 block that we already read
+        # Start looping over the requested reactions entry since it is the
+        # MT=451 block that we already read
         for rMF, rMT in reactions:
             found = False
-            for MF, MT, NC, MOD in self.reactionList[1:]:
+            for MF, MT, NC, MOD in self.reaction_list:
                 if MF == rMF and MT == rMT:
                     found = True
                     # File 1 data
                     if MF == 1:
-                        # Now read File1 (most likely unnecessary, but...)
-                        file1 = self.find_file(1)
-                        if not file1:
-                            file1 = ENDFFile1()
-                            self.files.append(file1)
                         # Number of total neutrons per fission
                         if MT == 452:
                             self._read_total_nu()
@@ -1033,238 +1051,222 @@ class Evaluation(object):
                             self._read_fission_energy()
                         elif MT == 460:
                             self._read_delayed_photon()
+
                     elif MF == 2:
-                        # Now read File2
-                        file2 = self.find_file(2)
-                        if not file2:
-                            file2 = ENDFFile2()
-                            self.files.append(file2)
+                        # File 2 -- Resonance parameters
                         if MT == 151:
                             self._read_resonances()
+
                     elif MF == 3:
-                        file3 = self.find_file(3)
-                        if not file3:
-                            file3 = ENDFFile3()
-                            self.files.append(file3)
+                        # File 3 -- Reaction cross sections
                         self._read_reaction_xs(MT)
+
+                    elif MF == 5:
+                        # File 5 -- Energy distributions
+                        self._read_energy_distribution(MT)
+
                     elif MF == 7:
-                        # Now read File7
-                        file7 = self.find_file(7)
-                        if not file7:
-                            file7 = ENDFFile7()
-                            self.files.append(file7)
+                        # File 7 -- Thermal scattering data
                         if MT == 2:
                             self._read_thermal_elastic()
                         if MT == 4:
                             self._read_thermal_inelastic()
+
                     elif MF == 8:
                         # Read File 8 -- decay and fission yield data
-                        file8 = self.find_file(8)
-                        if not file8:
-                            file8 = ENDFFile8()
-                            self.files.append(file8)
                         if MT == 454:
                             self._read_independent_yield()
                         elif MT == 459:
                             self._read_cumulative_yield()
                         elif MT == 457:
                             self._read_decay()
+
                     elif MF == 9:
                         # Read File 9 -- multiplicities
-                        file9 = self.find_file(9)
-                        if not file9:
-                            file9 = ENDFFile9()
-                            self.files.append(file9)
                         self._read_multiplicity(MT)
+
                     elif MF == 10:
                         # Read File 10 -- cross sections for production of
                         # radioactive nuclides
-                        file10 = self.find_file(10)
-                        if not file10:
-                            file10 = ENDFFile10()
-                            self.files.append(file10)
                         self._read_production_xs(MT)
 
             if not found:
-                if self.verbose:
+                if self._verbose:
                     print("Reaction not found")
                 raise NotFound('Reaction')
 
     def _read_header(self):
-        self.print_info(1, 451)
+        self._print_info(1, 451)
+        self._seek_mfmt(1, 451)
 
-        # Find reaction
-        self.seek_mfmt(1, 451)
-
-        # Now read File1
-        file1 = ENDFFile1()
-        self.files.append(file1)
-
-        # Create MT for description
-        data = ENDFReaction(451)
-        file1.reactions.append(data)
+        # Information about target/projectile
+        self.target = {}
+        self.projectile = {}
+        self.info = {}
 
         # First HEAD record
         items = self._get_head_record()
-        data.ZA = items[0]
-        data.AWR = items[1]
-        data.LRP = items[2]
-        data.LFI = items[3]
-        data.NLIB = items[4]
-        data.NMOD = items[5]
+        self.target['ZA'] = items[0]
+        self.target['mass'] = items[1]
+        self._LRP = items[2]
+        self.target['fissionable'] = (items[3] == 1)
+        try:
+            global libraries
+            library = libraries[items[4]]
+        except KeyError:
+            library = 'Unknown'
+        self.info['modification'] = items[5]
+
+        # Create dictionary for nu if fissionable
+        if self.target['fissionable']:
+            self.nu = {}
 
         # Control record 1
         items = self._get_cont_record()
-        data.ELIS = items[0]
-        data.STA = int(items[1])
-        data.LIS = items[2]
-        data.LISO = items[3]
-        data.NFOR = items[5]
+        self.target['excitation_energy'] = items[0]
+        self.target['stable'] = (int(items[1]) == 0)
+        self.target['state'] = items[2]
+        self.target['isomeric_state'] = items[3]
+        self.format = items[5]
+        assert self.format == 6
 
         # Control record 2
         items = self._get_cont_record()
-        data.AWI = items[0]
-        data.EMAX = items[1]
-        data.LREL = items[2]
-        data.NSUB = items[4]
-        data.NVER = items[5]
+        self.projectile['mass'] = items[0]
+        self.energy_max = items[1]
+        library_release = items[2]
+        self.sublibrary = items[4]
+        library_version = items[5]
+        self.info['library'] = (library, library_version, library_release)
 
         # Control record 3
         items = self._get_cont_record()
-        data.TEMP = items[0]
-        data.LDRV = items[2]
-        data.NWD = items[4]
-        data.NXC = items[5]
+        self.target['temperature'] = items[0]
+        self.info['derived'] = (items[2] > 0)
+        NWD = items[4]
+        NXC = items[5]
 
         # Text record 1
         items = self._get_text_record()
         text = items[0]
-        data.ZSYMAM = text[0:11]
-        data.ALAB = text[11:22]
-        data.EDATE = text[22:32]
-        data.AUTH = text[32:66]
+        self.target['zsymam'] = text[0:11]
+        self.info['laboratory'] = text[11:22]
+        self.info['date'] = text[22:32]
+        self.info['author'] = text[32:66]
 
         # Text record 2
         items = self._get_text_record()
         text = items[0]
-        data.REF = text[1:22]
-        data.DDATE = text[22:32]
-        data.RDATE = text[33:43]
-        data.ENDATE = text[55:63]
+        self.info['reference'] = text[1:22]
+        self.info['date_distribution'] = text[22:32]
+        self.info['date_release'] = text[33:43]
+        self.info['date_entry'] = text[55:63]
 
-        # Text record 3
-        items = self._get_text_record()
-        data.HSUB = items[0]
+        # Text records 3-5
+        items0 = self._get_text_record()
+        items1 = self._get_text_record()
+        items2 = self._get_text_record()
+        self.info['identifier'] = [items0[0], items1[0], items2[0]]
 
         # Now read descriptive records
-        data.description = []
-        for i in range(data.NWD - 3):
-            line = self.fh.readline()[:66]
-            data.description.append(line)
+        self.info['description'] = []
+        for i in range(NWD - 5):
+            line = self._fh.readline()[:66]
+            self.info['description'].append(line)
 
         # File numbers, reaction designations, and number of records
-        self.reactionList = []
-        while True:
-            line = self.fh.readline()
-            if line[72:75] == '  0':
-                break
-            items = self._get_cont_record(line, skipC=True)
-            MF = items[2]
-            MT = items[3]
-            NC = items[4]
-            MOD = items[5]
-            self.reactionList.append((MF,MT,NC,MOD))
+        self.reaction_list = []
+        for i in range(NXC):
+            items = self._get_cont_record(skipC=True)
+            MF, MT, NC, MOD = items[2:6]
+            self.reaction_list.append((MF,MT,NC,MOD))
 
     def _read_total_nu(self):
-        self.print_info(1, 452)
-
-        # Find file 1
-        file1 = self.find_file(1)
-
-        # Find reaction
-        self.seek_mfmt(1, 452)
+        self._print_info(1, 452)
+        self._seek_mfmt(1, 452)
 
         # Create total nu reaction
-        nuTotal = ENDFReaction(452)
-        file1.reactions.append(nuTotal)
+        self.nu['total'] = {}
 
         # Determine representation of total nu data
         items = self._get_head_record()
-        nuTotal.LNU = items[3]
+        LNU = items[3]
 
         # Polynomial representation
-        if nuTotal.LNU == 1:
-            nuTotal.coeffs = self._get_list_record()
+        if LNU == 1:
+            self.nu['total']['form'] = 'polynomial'
+            self.nu['total']['coefficients'] = np.asarray(
+                self._get_list_record(onlyList=True))
         # Tabulated representation
-        elif nuTotal.LNU == 2:
-            nuTotal.value = self._get_tab1_record()
+        elif LNU == 2:
+            self.nu['total']['form'] = 'tabulated'
+            params, self.nu['total']['values'] = self._get_tab1_record()
 
         # Skip SEND record
-        self.fh.readline()
+        self._fh.readline()
 
     def _read_delayed_nu(self):
-        self.print_info(1, 455)
-
-        # Find file 1
-        file1 = self.find_file(1)
-
-        # Find reaction
-        self.seek_mfmt(1, 455)
+        self._print_info(1, 455)
+        self._seek_mfmt(1, 455)
 
         # Create delayed nu reaction
-        nuDelay = ENDFReaction(455)
-        file1.reactions.append(nuDelay)
+        self.nu['delayed'] = {}
 
         # Determine representation of delayed nu data
         items = self._get_head_record()
-        nuDelay.LDG = items[2]
-        nuDelay.LNU = items[3]
+        LDG = items[2]
+        LNU = items[3]
+        self.nu['delayed']['decay_energy_dependent'] = (LDG == 1)
 
-        # Nu tabulated and delayed-group constants are energy-independent
-        if nuDelay.LNU == 2 and nuDelay.LDG == 0:
-            nuDelay.decayConst = self._get_list_record(onlyList=True)
-            nuDelay.value = self._get_tab1_record()
-            self.fh.readline()
-        elif nuDelay.LNU == 2 and nuDelay.LDG == 1:
+        if LDG == 0:
+            # Delayed-group constants energy independent
+            self.nu['delayed']['decay_constants'] = np.asarray(
+                self._get_list_record(onlyList=True))
+        elif LDG == 1:
+            # Delayed-group constants energy dependent
             raise NotImplementedError
-        elif nuDelay.LNU == 1 and nuDelay.LDG == 0:
-            raise NotImplementedError
-        elif nuDelay.LNU == 1 and nuDelay.LDG == 1:
-            raise NotImplementedError
+
+        if LNU == 1:
+            # Nu represented as polynomial
+            self.nu['delayed']['form'] = 'polynomial'
+            self.nu['delayed']['coefficients'] = np.asarray(
+                self._get_list_record(onlyList=True))
+        elif LNU == 2:
+            self.nu['delayed']['form'] = 'tabulated'
+            params, self.nu['delayed']['values'] = self._get_tab1_record()
+        self._fh.readline()
 
     def _read_prompt_nu(self):
-        self.print_info(1, 456)
+        self._print_info(1, 456)
+        self._seek_mfmt(1, 456)
 
         # Create delayed nu reaction
-        nuPrompt = ENDFReaction(456)
-        self.find_file(1).reactions.append(nuPrompt)
-
-        # Find reaction
-        self.seek_mfmt(1, 456)
+        self.nu['prompt'] = {}
 
         # Determine representation of delayed nu data
         items = self._get_head_record()
-        nuPrompt.LNU = items[3]
+        LNU = items[3]
 
-        # Tabulated values of nu
-        if nuPrompt.LNU == 2:
-            nuPrompt.value = self._get_tab1_record()
-        # Spontaneous fission
-        elif nuPrompt.LNU == 1:
-            nuPrompt.value = self._get_list_record(onlyList=True)
+        if LNU == 1:
+            # Polynomial representation (spontaneous fission)
+            self.nu['prompt']['form'] = 'polynomial'
+            self.nu['prompt']['coefficients'] = np.asarray(
+                self._get_list_record(onlyList=True))
+        elif LNU == 2:
+            # Tabulated values of nu
+            self.nu['prompt']['form'] = 'tabulated'
+            params, self.nu['prompt']['values'] = self._get_tab1_record()
 
         # Skip SEND record
-        self.fh.readline()
+        self._fh.readline()
 
     def _read_fission_energy(self):
-        self.print_info(1, 458)
+        self._print_info(1, 458)
+        self._seek_mfmt(1, 458)
 
         # Create fission energy release reaction
-        eRelease = ENDFReaction(458)
-        self.find_file(1).reactions.append(eRelease)
-
-        # Find reaction
-        self.seek_mfmt(1, 458)
+        er = {}
+        self.fission_energy_release = er
 
         # Skip HEAD record
         self._get_head_record()
@@ -1272,156 +1274,217 @@ class Evaluation(object):
         # Read LIST record containing components of fission energy release (or
         # coefficients)
         items, values = self._get_list_record()
-        eRelease.NPLY = items[3]
-        if eRelease.NPLY == 0:
-            eRelease.fissProducts = (values[0], values[1])
-            eRelease.promptNeuts = (values[2], values[3])
-            eRelease.delayNeuts = (values[4], values[5])
-            eRelease.promptGammas = (values[6], values[7])
-            eRelease.delayGammas = (values[8], values[9])
-            eRelease.delayBetas = (values[10], values[11])
-            eRelease.neutrinos = (values[12], values[13])
-            eRelease.pseudoQ = (values[14], values[15])
-            eRelease.total = (values[16], values[17])
-        elif eRelease.NPLY > 0:
-            eRelease.fissProducts = zip(values[0::18], values[1::18])
-            eRelease.promptNeuts = zip(values[2::18], values[3::18])
-            eRelease.delayNeuts = zip(values[4::18], values[5::18])
-            eRelease.promptGammas = zip(values[6::18], values[7::18])
-            eRelease.delayGammas = zip(values[8::18], values[9::18])
-            eRelease.delayBetas = zip(values[10::18], values[11::18])
-            eRelease.neutrinos = zip(values[12::18], values[13::18])
-            eRelease.pseudoQ = zip(values[14::18], values[15::18])
-            eRelease.total = zip(values[16::18], values[16::18])
+        NPLY = items[3]
+        er['order'] = NPLY
+
+        values = np.asarray(values)
+        values.shape = (NPLY + 1, 18)
+        er['fission_products'] = np.vstack(values[:,0], values[:,1])
+        er['prompt_neutrons'] = np.vstack(values[:,2], values[:,3])
+        er['delayed_neutrons'] = np.vstack(values[:,4], values[:,5])
+        er['prompt_gammas'] = np.vstack(values[:,6], values[:,7])
+        er['delayed_gammas'] = np.vstack(values[:,8], values[:,9])
+        er['delayed_betas'] = np.vstack(values[:,10], values[:,11])
+        er['neutrinos'] = np.vstack(values[:,12], values[:,13])
+        er['total_less_neutrinos'] = np.vstack(values[:,14], values[:,15])
+        er['total'] = np.vstack(values[:,16], values[:,17])
 
         # Skip SEND record
-        self.fh.readline()
+        self._fh.readline()
 
     def _read_reaction_xs(self, MT):
-        self.print_info(3, MT)
+        self._print_info(3, MT)
+        self._seek_mfmt(3, MT)
 
-        # Find file3
-        file3 = self.find_file(3)
-
-        # Create MT for reaction cross section
-        xs = ENDFReaction(MT)
-        file3.reactions.append(xs)
-
-        # Find reaction
-        self.seek_mfmt(3, MT)
+        # Get Reaction instance
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.MFs.append(3)
 
         # Read HEAD record with ZA and atomic mass ratio
         items = self._get_head_record()
-        xs.ZA = items[0]
-        xs.AWR = items[1]
 
         # Read TAB1 record with reaction cross section
-        xs.sigma = self._get_tab1_record()
-        xs.QM = xs.sigma.params[0] # Mass difference Q value
-        xs.QI = xs.sigma.params[1] # Reaction Q value
-        xs.LR = xs.sigma.params[3] # Complex breakup flag
+        params, rxn.cross_section = self._get_tab1_record()
+        rxn.Q_mass_difference = params[0]
+        rxn.Q_reaction = params[1]
+        rxn.complex_breakup_flag = params[3]
 
         # Skip SEND record
-        self.fh.readline()
+        self._fh.readline()
+
+    def _read_energy_distribution(self, MT):
+        # Find energy distribution
+        self._print_info(5, MT)
+        self._seek_mfmt(5, MT)
+
+        # Get Reaction instance
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.MFs.append(5)
+
+        # Read HEAD record
+        items = self._get_head_record()
+        nk = items[4]
+
+        rxn.distributions = []
+        for i in range(nk):
+            edist = EnergyDistribution()
+
+            # Read TAB1 record for p(E)
+            params, applicability = self._get_tab1_record()
+            lf = params[3]
+            if lf == 1:
+                edist.tab2 = self._get_tab2_record()
+                n_energies = edist.tab2.params[5]
+
+                edist.func_list = []
+                edist.energy_in = np.zeros(n_energies)
+                for j in range(n_energies):
+                    params, func = self._get_tab1_record()
+                    self.energy_in[j] = params[1]
+                    edist.func_list.append(func)
+            elif lf == 5:
+                # General evaporation spectrum
+                edist.u = params[0]
+                params, edist.theta = self._get_tab1_record()
+                params, edist.g = self._get_tab1_record()
+            elif lf == 7:
+                # Simple Maxwellian fission spectrum
+                edist.u = params[0]
+                params, edist.theta = self._get_tab1_record()
+            elif lf == 9:
+                # Evaporation spectrum
+                edist.u = params[0]
+                params, edist.theta = self._get_tab1_record()
+            elif lf == 11:
+                # Energy-dependent Watt spectrum
+                edist.u = params[0]
+                params, edist.a = self._get_tab1_record()
+                params, edist.b = self._get_tab1_record()
+            elif lf == 12:
+                # Energy-dependent fission neutron spectrum (Madland-Nix)
+                params, edist.tm = self._get_tab1_record()
+                edist.efl, edist.efh = params[0:2]
+
+            edist.lf = lf
+            edist.applicability = applicability
+            rxn.distributions.append(edist)
 
     def _read_delayed_photon(self):
-        self.print_info(1, 460)
+        self._print_info(1, 460)
+        self._seek_mfmt(1, 460)
 
         # Create delayed photon data reaction
-        dp = ENDFReaction(460)
-        self.find_file(1).reactions.append(dp)
-
-        # Find reaction
-        self.seek_mfmt(1, 460)
+        dp = {}
+        self.delayed_photons = dp
 
         # Determine whether discrete or continuous representation
         items = self._get_head_record()
-        dp.LO = items[2]
-        dp.NG = items[4]
+        LO = items[2]
+        NG = items[4]
 
         # Discrete representation
-        if dp.LO == 1:
+        if LO == 1:
+            dp['form'] = 'discrete'
+
             # Initialize lists for energies of photons and time dependence of
             # photon multiplicity
-            dp.energy = []
-            dp.multiplicity = []
-            for i in range(dp.NG):
+            dp['energy'] = np.zeros(NG)
+            dp['multiplicity'] = []
+            for i in range(NG):
                 # Read TAB1 record with multiplicity as function of time
-                mult = self._get_tab1_record()
-                dp.multiplicity.append(mult)
+                params, mult = self._get_tab1_record()
+                dp['multiplicity'].append(mult)
 
                 # Determine energy
-                E = mult.params[0]
-                dp.energy.append(E)
+                dp['energy'][i] = params[0]
 
         # Continuous representation
-        elif dp.LO == 2:
+        elif LO == 2:
             # Determine decay constant and number of precursor families
-            dp.decayConst = self._get_list_record(onlyList=True)
-            dp.NNF = len(dp.decayConst)
+            dp['form'] = 'continuous'
+            dp['decay_constant'] = self._get_list_record(onlyList=True)
 
     def _read_resonances(self):
-        self.print_info(2, 151)
-
-        # Find reaction
-        self.seek_mfmt(2, 151)
-
-        # Now read File2
-        file2 = self.find_file(2)
+        self._print_info(2, 151)
+        self._seek_mfmt(2, 151)
 
         # Create MT for resonances
-        res = ENDFReaction(151)
-        file2.reactions.append(res)
-        res.resonances = []
+        res = {}
+        self.resonances = res
 
         # Determine whether discrete or continuous representation
         items = self._get_head_record()
-        res.NIS = items[4] # Number of isotopes
+        NIS = items[4] # Number of isotopes
+        res['isotopes'] = []
 
-        for iso in range(res.NIS):
+        for iso in range(NIS):
+            # Create dictionary for this isotope
+            isotope = {}
+            res['isotopes'].append(isotope)
+
             items = self._get_cont_record()
-            res.ABN = items[1] # isotopic abundance
-            res.LFW = items[3] # fission widths present?
-            res.NER = items[4] # number of resonance energy ranges
+            isotope['abundance'] = items[1]
+            LFW = items[3] # average fission width flag
+            NER = items[4] # number of resonance energy ranges
 
-            for erange in range(res.NER):
+            isotope['ranges'] = []
+
+            for j in range(NER):
+                # Create dictionary for energy range
+                erange = {}
+                isotope['ranges'].append(erange)
+
                 items = self._get_cont_record()
-                res.EL = items[0] # lower limit of energy range
-                res.EH = items[1] # upper limit of energy range
-                res.LRU = items[2] # flag for resolved (1)/unresolved (2)
-                res.LRF = items[3] # resonance representation
-                res.NRO = items[4] # flag for energy dependence of scattering radius
-                res.NAPS = items[5] # flag controlling use of channel/scattering radius
+                erange['energy_min'] = items[0]
+                erange['energy_max'] = items[1]
+                LRU = items[2]  # flag for resolved (1)/unresolved (2)
+                LRF = items[3]  # resonance representation
+                erange['NRO'] = items[4]  # flag for energy dependence of scattering radius
+                erange['NAPS'] = items[5]  # flag controlling use of channel/scattering radius
 
-                # Only scattering radius specified
-                if res.LRU == 0 and res.NRO == 0:
+                if LRU == 0 and erange['NRO'] == 0:
+                    # Only scattering radius specified
+                    erange['type'] = 'scattering_radius'
                     items = self._get_cont_record()
-                    res.SPI = items[0]
-                    res.AP = items[1]
-                    res.NLS = items[4]
-                # resolved resonance region
-                elif res.LRU == 1:
-                    self._read_resolved(res)
-                # unresolved resonance region
-                elif res.LRU == 2:
-                    self._read_unresolved(res)
+                    erange['spin'] = items[0]
+                    erange['scattering_radius'] = items[1]
+                elif LRU == 1:
+                    # resolved resonance region
+                    erange['type'] = 'resolved'
+                    erange['representation'] = resonance_types[LRF]
+                    self._read_resolved(erange)
+                    if NIS == 1:
+                        res['resolved'] = erange
+                elif LRU == 2:
+                    # unresolved resonance region
+                    erange['type'] = 'unresolved'
+                    self._read_unresolved(erange, LFW, LRF)
+                    if NIS == 1:
+                        res['unresolved'] = erange
 
-    def _read_resolved(self, res):
-        # Single- or Multi-level Breit Wigner
-        if res.LRF == 1 or res.LRF == 2:
+    def _read_resolved(self, erange):
+        if erange['representation'] in ('SLBW', 'MLBW'):
+            # -------------- Single- or Multi-level Breit Wigner ---------------
+
             # Read energy-dependent scattering radius if present
-            if res.NRO > 0:
-                res.AP = self._get_tab1_record()
+            if erange['NRO'] != 0:
+                params, erange['scattering_radius'] = self._get_tab1_record()
 
             # Other scatter radius parameters
             items = self._get_cont_record()
-            res.SPI = items[0] # Spin, I, of the target nucleus
-            if res.NRO == 0:
-                res.AP = items[1]
-            res.NLS = items[4] # Number of l-values
+            erange['spin'] = items[0]
+            if erange['NRO'] == 0:
+                erange['scattering_radius'] = items[1]
+            NLS = items[4]  # Number of l-values
+
+            erange['resonances'] = []
 
             # Read resonance widths, J values, etc
-            for l in range(res.NLS):
+            for l in range(NLS):
                 headerItems, items = self._get_list_record()
                 QX, L, LRX = headerItems[1:4]
                 energy = items[0::6]
@@ -1441,25 +1504,28 @@ class Evaluation(object):
                     resonance.GN = GN[i]
                     resonance.GG = GG[i]
                     resonance.GF = GF[i]
-                    res.resonances.append(resonance)
+                    erange['resonances'].append(resonance)
 
-        # Reich-Moore
-        elif res.LRF == 3:
+        elif erange['representation'] == 'RM':
+            # ------------------------- Reich-Moore ----------------------------
+
             # Read energy-dependent scattering radius if present
-            if res.NRO > 0:
-                res.AP = self._get_tab1_record()
+            if erange['NRO'] != 0:
+                params, erange['scattering_radius'] = self._get_tab1_record()
 
             # Other scatter radius parameters
             items = self._get_cont_record()
-            res.SPI = items[0] # Spin, I, of the target nucleus
-            if res.NRO == 0:
-                res.AP = items[1]
-            res.LAD = items[3] # Flag for angular distribution
-            res.NLS = items[4] # Number of l-values
-            res.NLSC = items[5] # Number of l-values for convergence
+            erange['spin'] = items[0]
+            if erange['NRO'] == 0:
+                erange['scattering_radius'] = items[1]
+            erange['LAD'] = items[3]  # Flag for angular distribution
+            NLS = items[4]  # Number of l-values
+            NLSC = items[5]  # Number of l-values for convergence
+
+            erange['resonances'] = []
 
             # Read resonance widths, J values, etc
-            for l in range(res.NLS):
+            for l in range(NLS):
                 headerItems, items = self._get_list_record()
                 APL, L = headerItems[1:3]
                 energy = items[0::6]
@@ -1478,94 +1544,224 @@ class Evaluation(object):
                     resonance.GG = GG[i]
                     resonance.GFA = GFA[i]
                     resonance.GFB = GFB[i]
-                    res.resonances.append(resonance)
+                    erange['resonances'].append(resonance)
 
-    def _read_unresolved(self, res):
-        pass
+        elif erange['representation'] == 'AA':
+            # --------------------------- Adler-Adler --------------------------
+
+            # Read energy-dependent scattering radius if present
+            if erange['NRO'] != 0:
+                params, erange['scattering_radius'] = self._get_tab1_record()
+
+            # Other scatter radius parameters
+            items = self._get_cont_record()
+            erange['spin'] = items[0]
+            if erange['NRO'] == 0:
+                erange['scattering_radius'] = items[1]
+            NLS = items[4]  # Number of l-values
+
+            # Get AT, BT, AF, BF, AC, BC constants
+            items, values = self._get_list_record()
+            erange['LI'] = items[2]
+            NX = items[5]
+            erange['AT'] = np.asarray(values[:4])
+            erange['BT'] = np.asarray(values[4:6])
+            if NX == 2:
+                erange['AC'] = np.asarray(values[6:10])
+                erange['BC'] = np.asarray(values[10:12])
+            elif NX == 3:
+                erange['AF'] = np.asarray(values[6:10])
+                erange['BF'] = np.asarray(values[10:12])
+                erange['AC'] = np.asarray(values[12:16])
+                erange['BC'] = np.asarray(values[16:18])
+
+            erange['resonances'] = []
+
+            for ls in range(NLS):
+                items = self._get_cont_record()
+                l_value = items[2]
+                NJS = items[4]
+                for j in range(NJS):
+                    items, values = self._get_list_record()
+                    AJ = items[0]
+                    NLJ = items[5]
+                    for res in range(NLJ):
+                        resonance = AdlerAdler()
+                        resonance.L, resonance.J = l_value, AJ
+                        resonance.DET = values[12*res]
+                        resonance.DWT = values[12*res + 1]
+                        resonance.DRT = values[12*res + 2]
+                        resonance.DIT = values[12*res + 3]
+                        resonance.DEF_ = values[12*res + 4]
+                        resonance.DWF = values[12*res + 5]
+                        resonance.GRG = values[12*res + 6]
+                        resonance.GIF = values[12*res + 7]
+                        resonance.DEC = values[12*res + 8]
+                        resonance.DWC = values[12*res + 9]
+                        resonance.DRC = values[12*res + 10]
+                        resonance.DIC = values[12*res + 11]
+                        erange['resonances'].append(resonance)
+
+        elif erange['representation'] == 'RML':
+            pass
+
+    def _read_unresolved(self, erange, LFW, LRF):
+        erange['fission_widths'] = (LFW == 1)
+        erange['LRF'] = LRF
+
+        # Read energy-dependent scattering radius if present
+        if erange['NRO'] != 0:
+            params, erange['scattering_radius'] = self._get_tab1_record()
+
+        # Get SPI, AP, and LSSF
+        if not (LFW == 1 and LRF == 1):
+            items = self._get_cont_record()
+            erange['spin'] = items[0]
+            if erange['NRO'] == 0:
+                erange['scatter_radius'] = items[1]
+            erange['LSSF'] = items[2]
+
+        if LFW == 0 and LRF == 1:
+            # Case A -- fission widths not given, all parameters are
+            # energy-independent
+            NLS = items[4]
+            erange['l_values'] = np.zeros(NLS)
+            erange['parameters'] = {}
+            for ls in range(NLS):
+                items, values = self._get_list_record()
+                l = items[2]
+                NJS = items[5]
+                erange['l_values'][ls] = l
+                params = {}
+                erange['parameters'][l] = params
+                params['d'] = np.asarray(values[0::6])
+                params['j'] = np.asarray(values[1::6])
+                params['amun'] = np.asarray(values[2::6])
+                params['gn0'] = np.asarray(values[3::6])
+                params['gg'] = np.asarray(values[4::6])
+                # params['gf'] = np.zeros(NJS)
+
+        elif LFW == 1 and LRF == 1:
+            # Case B -- fission widths given, only fission widths are
+            # energy-dependent
+            items, erange['energies'] = self._get_list_record()
+            erange['spin'] = items[0]
+            if erange['NRO'] == 0:
+                erange['scatter_radius'] = items[1]
+            erange['LSSF'] = items[2]
+            NE, NLS = items[4:6]
+            erange['l_values'] = np.zeros(NLS)
+            erange['parameters'] = {}
+            for ls in range(NLS):
+                items = self._get_cont_record()
+                l = items[2]
+                NJS = items[4]
+                erange['l_values'][ls] = l
+                params = {}
+                erange['parameters'][l] = params
+                params['d'] = np.zeros(NJS)
+                params['j'] = np.zeros(NJS)
+                params['amun'] = np.zeros(NJS)
+                params['gn0'] = np.zeros(NJS)
+                params['gg'] = np.zeros(NJS)
+                params['gf'] = []
+                for j in range(NJS):
+                    items, values = self._get_list_record()
+                    muf = items[3]
+                    params['d'][j] = values[0]
+                    params['j'][j] = values[1]
+                    params['amun'][j] = values[2]
+                    params['gn0'][j] = values[3]
+                    params['gg'][j] = values[4]
+                    params['gf'].append(np.asarray(values[6:]))
+
+        elif LRF == 2:
+            # Case C -- all parameters are energy-dependent
+            NLS = items[4]
+            erange['l_values'] = np.zeros(NLS)
+            erange['parameters'] = {}
+            for ls in range(NLS):
+                items = self._get_cont_record()
+                l = items[2]
+                NJS = items[4]
+                erange['l_values'][ls] = l
+                params = {}
+                erange['parameters'][l] = params
+                params['j'] = np.zeros(NJS)
+                params['amux'] = np.zeros(NJS)
+                params['amun'] = np.zeros(NJS)
+                params['amug'] = np.zeros(NJS)
+                params['amuf'] = np.zeros(NJS)
+                params['energies'] = []
+                params['d'] = []
+                params['gx'] = []
+                params['gn0'] = []
+                params['gg'] = []
+                params['gf'] = []
+                for j in range(NJS):
+                    items, values = self._get_list_record()
+                    ne = items[5]
+                    params['j'][j] = items[0]
+                    params['amux'][j] = values[2]
+                    params['amun'][j] = values[3]
+                    params['amug'][j] = values[4]
+                    params['amuf'][j] = values[5]
+                    params['energies'].append(np.asarray(values[6::6]))
+                    params['d'].append(np.asarray(values[7::6]))
+                    params['gx'].append(np.asarray(values[8::6]))
+                    params['gn0'].append(np.asarray(values[9::6]))
+                    params['gg'].append(np.asarray(values[10::6]))
+                    params['gf'].append(np.asarray(values[11::6]))
 
     def _read_thermal_elastic(self):
-        # Find file7
-        file7 = self.find_file(7)
+        self._print_info(7, 2)
+        self._seek_mfmt(7, 2)
 
-        # Create MT for resonances
-        elast = ENDFReaction(2)
-        self.print_info(7, 2)
-
-        # Seek File 7
-        self.seek_mfmt(7, 2)
+        # Create dictionary for thermal elastic data
+        elast = {}
+        self.thermal_elastic = elast
 
         # Get head record
         items = self._get_head_record()
-        elast.ZA = items[0] # ZA identifier
-        elast.AWR = items[1] # AWR
-        elast.LTHR = items[2] # coherent/incoherent flag
-        if elast.LTHR == 1:
-            if self.verbose:
-                print("Coherent elastic")
-                temp = []
-                eint = []
-                set = []
-                temp0 = self._get_tab1_record()
-                # Save temp
-                temp.append(temp0.params[0])
-                # Save Eint
-                eint = temp0.x
-                # Save S(E, T0)
-                set.append(temp0.y)
-                elast.LT = temp0.params[2]
-                if self.veryverbose:
-                    print("Number of temperatures: {0}".format(elast.LT+1))
-                for t in range(elast.LT):
-                    heads, s = self._get_list_record()
-                    # Save S(E,T)
-                    set.append(s)
-                    # Save T
-                    temp.append(heads[0])
-                elast.temp = np.array(temp)
-                elast.set = np.array(set)
-                elast.eint = np.array(eint)
+        LTHR = items[2]  # coherent/incoherent flag
+        elast['S'] = {}
+
+        if LTHR == 1:
+            elast['type'] = 'coherent'
+            params, sdata = self._get_tab1_record()
+            temperature = params[0]
+            LT = params[2]
+            elast['S'][temperature] = sdata
+
+            for t in range(LT):
+                params, sdata = self._get_list_record()
+                temperature = params[0]
+                LT = params[2]
+                elast['S'][temperature] = sdata
+
         elif elast.LTHR == 2:
-            if self.verbose:
-                print("Incoherent elastic")
-                temp = []
-                eint = []
-                set = []
-                record = self._get_tab1_record()
-                # Save cross section
-                elast.sb = record.params[0]
-                # Save Tint
-                elast.t = np.array(record.x)
-                # Save W(T)
-                elast.w = np.array(record.y)
-        else:
-            print("Invalid value of LHTR")
-        file7.reactions.append(elast)
+            elast['type'] = 'incoherent'
+            params, wt = self._get_tab1_record()
+            elast['bound_cross_section'] = params[0]
+            elast['debye_waller'] = wt
 
     def _read_thermal_inelastic(self):
-        # Find file7
-        file7 = self.find_file(7)
+        self._print_info(7, 4)
+        self._seek_mfmt(7, 4)
 
-        # Create MT for resonances
-        inel = ENDFReaction(4)
-        self.print_info(7, 4)
-
-        # Seek File 7
-        self.seek_mfmt(7, 4)
+        # Create dictionary for thermal inelstic data
+        inel = {}
+        self.thermal_inelastic = inel
 
         # Get head record
         items = self._get_head_record()
-        inel.ZA = items[0] # ZA identifier
-        inel.AWR = items[1] # AWR
-        inel.LAT = items[3] # Temperature flag
-        inel.LASYM = items[4] # Symmetry flag
-        HeaderItems, B = self._get_list_record()
-        inel.LLN = HeaderItems[2]
-        inel.NS = HeaderItems[5]
-        inel.B = B
-        if B[0] == 0.0:
-            if self.verbose:
-                print("No principal atom")
-        else:
+        inel['LAT'] = items[3]  # Temperature flag
+        inel['LASYM'] = items[4]  # Symmetry flag
+        header, B = self._get_list_record()
+        inel['LLN'] = header[2]
+        inel['NS'] = header[5]
+        inel['B'] = B
+        if B[0] != 0.0:
             nbeta = self._get_tab2_record()
             sabt = []
             beta = []
@@ -1573,174 +1769,149 @@ class Evaluation(object):
                 #Read record for first temperature (always present)
                 sabt_temp = []
                 temp = []
-                temp0 = self._get_tab1_record()
+                params, temp0 = self._get_tab1_record()
                 # Save S(be, 0, :)
-                sabt_temp.append(temp0.y)
-                # Save alpha(:)
-                alpha = temp0.x
-                # Save beta(be)
-                beta.append(temp0.params[1])
-                # Save temperature
-                temp.append(temp0.params[0])
-                inel.LT = temp0.params[2]
-                if self.veryverbose:
-                    print("Number of temperatures: {0}".format(inel.LT+1))
-                for t in range(inel.LT):
-                    #Read records for all the other temperatures
+                sabt_temp.append(temp0)
+                beta.append(params[1])
+                temp.append(params[0])
+                LT = temp0.params[2]
+                for t in range(LT):
+                    # Read records for all the other temperatures
                     headsab, sa = self._get_list_record()
-                    # Save S(be, t+1, :)
                     sabt_temp.append(sa)
-                    # Save temperature
                     temp.append(headsab[0])
                 sabt.append(sabt_temp)
+
             # Prepare arrays for output
-            sabt = np.array(sabt)
-            inel.sabt = []
-            for i in range(np.shape(sabt)[1]):
-                inel.sabt.append(np.transpose(sabt[:, i, :]))
-            inel.sabt = np.array(inel.sabt)
-            inel.alpha = np.array(alpha)
-            inel.beta = np.array(beta)
-            inel.temp = np.array(temp)
-        teffrecord = self._get_tab1_record()
-        inel.teff = teffrecord.y
-        file7.reactions.append(inel)
+            inel['sabt'] = sabt
+            inel['beta'] = np.array(beta)
+            inel['temp'] = np.array(temp)
+
+        params, teff = self._get_tab1_record()
+        inel['teff'] = teff
 
     def _read_independent_yield(self):
-        self.print_info(8, 454)
+        self._print_info(8, 454)
+        self._seek_mfmt(8, 454)
 
-        # Find file8
-        file8 = self.find_file(8)
-
-        # Create MT for resonances
-        iyield = ENDFReaction(454)
-        file8.reactions.append(iyield)
-
-        # Seek File 8
-        self.seek_mfmt(8, 454)
+        # Create dictionary for independent yield
+        iyield = {}
+        self.yield_independent = iyield
 
         # Initialize energies and yield dictionary
-        iyield.energies = []
-        iyield.data = {}
-        iyield.interp = []
+        iyield['energies'] = []
+        iyield['data'] = {}
+        iyield['interp'] = []
 
         items = self._get_head_record()
-        iyield.ZA = items[0]
-        iyield.AWR = items[1]
-        LE = items[2] - 1 # Determine energy-dependence
+        iyield['ZA'] = items[0]
+        iyield['AWR'] = items[1]
+        LE = items[2] - 1  # Determine energy-dependence
 
         for i in range(LE):
             items, itemList = self._get_list_record()
-            E = items[0] # Incident particle energy
-            iyield.energies.append(E)
-            NFP = items[5] # Number of fission product nuclide states
+            E = items[0]  # Incident particle energy
+            iyield['energies'].append(E)
+            NFP = items[5]  # Number of fission product nuclide states
             if i > 0:
-                iyield.interp.append(items[2]) # Interpolation scheme
+                iyield['interp'].append(items[2]) # Interpolation scheme
 
             # Get data for each yield
-            iyield.data[E] = {}
-            iyield.data[E]['zafp'] = [int(i) for i in itemList[0::4]] # ZA for fission products
-            iyield.data[E]['fps'] = itemList[1::4] # State designator
-            iyield.data[E]['yi'] = zip(itemList[2::4],itemList[3::4]) # Independent yield
+            iyield['data'][E] = {}
+            iyield['data'][E]['zafp'] = [int(i) for i in itemList[0::4]] # ZA for fission products
+            iyield['data'][E]['fps'] = itemList[1::4] # State designator
+            iyield['data'][E]['yi'] = zip(itemList[2::4],itemList[3::4]) # Independent yield
 
         # Skip SEND record
-        self.fh.readline()
+        self._fh.readline()
 
     def _read_cumulative_yield(self):
-        self.print_info(8, 459)
+        self._print_info(8, 459)
+        self._seek_mfmt(8, 459)
 
-        # Find file8
-        file8 = self.find_file(8)
-
-        # Create MT for resonances
-        cyield = ENDFReaction(459)
-        file8.reactions.append(cyield)
-
-        # Seek File 8
-        self.seek_mfmt(8, 459)
+        # Create dictionary for cumulative yield
+        cyield = {}
+        self.yield_cumulative = cyield
 
         # Initialize energies and yield dictionary
-        cyield.energies = []
-        cyield.data = {}
-        cyield.interp = []
+        cyield['energies'] = []
+        cyield['data'] = {}
+        cyield['interp'] = []
 
         items = self._get_head_record()
-        cyield.ZA = items[0]
-        cyield.AWR = items[1]
-        LE = items[2] - 1 # Determine energy-dependence
+        cyield['ZA'] = items[0]
+        cyield['AWR'] = items[1]
+        LE = items[2] - 1  # Determine energy-dependence
 
         for i in range(LE):
             items, itemList = self._get_list_record()
-            E = items[0] # Incident particle energy
-            cyield.energies.append(E)
-            NFP = items[5] # Number of fission product nuclide states
+            E = items[0]  # Incident particle energy
+            cyield['energies'].append(E)
+            NFP = items[5]  # Number of fission product nuclide states
             if i > 0:
-                cyield.interp.append(items[2]) # Interpolation scheme
+                cyield['interp'].append(items[2]) # Interpolation scheme
 
             # Get data for each yield
-            cyield.data[E] = {}
-            cyield.data[E]['zafp'] = [int(i) for i in itemList[0::4]] # ZA for fission products
-            cyield.data[E]['fps'] = itemList[1::4] # State designator
-            cyield.data[E]['yc'] = zip(itemList[2::4],itemList[3::4]) # Cumulative yield
+            cyield['data'][E] = {}
+            cyield['data'][E]['zafp'] = [int(i) for i in itemList[0::4]] # ZA for fission products
+            cyield['data'][E]['fps'] = itemList[1::4] # State designator
+            cyield['data'][E]['yc'] = zip(itemList[2::4],itemList[3::4]) # Cumulative yield
 
         # Skip SEND record
-        self.fh.readline()
+        self._fh.readline()
 
     def _read_decay(self):
-        decay_type = []
-        self.print_info(8, 457)
+        self._print_info(8, 457)
+        self._seek_mfmt(8, 457)
 
-        # Find file8
-        file8 = self.find_file(8)
-
-        # Create MT for resonances
-        decay = ENDFReaction(457)
-        file8.reactions.append(decay)
-
-        # Find reaction
-        self.seek_mfmt(8, 457)
+        decay = {}
+        self.decay = decay
 
         # Get head record
         items = self._get_head_record()
-        decay.ZA = items[0] # ZA identifier
-        decay.AWR = items[1] # AWR
-        decay.LIS = items[2] # State of the original nuclide
-        decay.LISO = items[3] # Isomeric state for the original nuclide
-        decay.NST = items[4] # Nucleus stability flag
+        decay['ZA'] = items[0]  # ZA identifier
+        decay['awr'] = items[1]  # AWR
+        decay['state']= items[2]  # State of the original nuclide
+        decay['isomeric_state'] = items[3]  # Isomeric state for the original nuclide
+        decay['stable'] = (items[4] == 1)  # Nucleus stability flag
 
-        # Determine if radioactive (0)/stable (1)
-        if decay.NST == 0:
-            decay.NSP = items[5] # Number of radiation types
+        # Determine if radioactive/stable
+        if not decay['stable']:
+            NSP = items[5]  # Number of radiation types
 
             # Half-life and decay energies
             items, itemList = self._get_list_record()
-            decay.half_life = (items[0], items[1])
-            decay.NC = items[4]//2
-            decay.energies = zip(itemList[0::2], itemList[1::2])
+            decay['half_life'] = (items[0], items[1])
+            decay['NC'] = items[4]//2
+            decay['energies'] = zip(itemList[0::2], itemList[1::2])
 
             # Decay mode information
             items, itemList = self._get_list_record()
-            decay.SPI = items[0] # Spin of the nuclide
-            decay.PAR = items[1] # Parity of the nuclide
-            decay.NDK = items[5] # Number of decay modes
+            decay['spin'] = items[0]  # Spin of the nuclide
+            decay['parity'] = items[1]  # Parity of the nuclide
+            NDK = items[5]  # Number of decay modes
+
             # Decay type (beta, gamma, etc.)
-            decay.RTYP = []
+            decay['modes'] = {}
+            decay['modes']['type'] = []
             for i in itemList[0::6]:
                 if i % 1.0 == 0:
-                    decay.RTYP.append(decay_type[int(i)])
+                    decay['modes']['type'].append(radiation_type[int(i)])
                 else:
-                    # TODO: Handle multiple decay
-                    raise NotImplementedError
-            decay.RFS = itemList[1::6] # Isomeric state for daughter
-            decay.Q = zip(itemList[2::6], itemList[3::6]) # Total decay energy
-            decay.BR = zip(itemList[4::6], itemList[5::6]) # Branching ratios
+                    decay['modes']['type'].append(
+                        (radiation_type[int(i)],
+                         radiation_type[int(10*i % 10)]))
+            decay['modes']['isomeric_state'] = itemList[1::6]
+            decay['modes']['energy'] = zip(itemList[2::6], itemList[3::6])
+            decay['modes']['branching_ratio'] = zip(itemList[4::6], itemList[5::6])
 
             # Read spectra
-            for i in range(decay.NSP):
+            decay['spectra'] = {}
+            for i in range(NSP):
                 items, itemList = self._get_list_record()
-                STYP = decay_type[items[1]] # Decay radiation type
-                LCON = items[2] # Continuous spectrum flag
-                NER = items[5] # Number of tabulated discrete energies
+                STYP = radiation_type[items[1]]  # Decay radiation type
+                LCON = items[2]  # Continuous spectrum flag
+                NER = items[5]  # Number of tabulated discrete energies
 
                 if LCON != 1:
                     for j in range(NER):
@@ -1753,81 +1924,69 @@ class Evaluation(object):
                     if LCOV != 0:
                         items, itemList = self._get_list_record()
 
-        elif decay.NST == 1:
+                decay['spectra'][STYP] = {'LCON': LCON, 'NER': NER}
+
+        else:
             items, itemList = self._get_list_record()
             items, itemList = self._get_list_record()
-            decay.SPI = items[0]
-            decay.PAR = items[1]
+            decay['spin'] = items[0]
+            decay['parity'] = items[1]
 
         # Skip SEND record
-        self.fh.readline()
+        self._fh.readline()
 
     def _read_multiplicity(self, MT):
-        self.print_info(9, MT)
+        self._print_info(9, MT)
+        self._seek_mfmt(9, MT)
 
-        # Find file9
-        file9 = self.find_file(9)
-
-        # Create MT for resonances
-        mp = ENDFReaction(MT)
-        file9.reactions.append(mp)
-
-        # Find reaction
-        self.seek_mfmt(9, MT)
+        # Get Reaction instance
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.MFs.append(9)
 
         # Get head record
         items = self._get_head_record()
-        mp.ZA = items[0]
-        mp.AWR = items[1] # Atomic mass ratio
-        mp.LIS = items[2] # Level number of the target
-        mp.NS = items[4] # Number of final states
+        NS = items[4]  # Number of final states
 
-        mp.multiplicities = []
-        for i in range(mp.NS):
-            state = self._get_tab1_record()
-            state.QM = state.params[0] # Mass difference Q value (eV)
-            state.QI = state.params[1] # Reaction Q value (eV)
-            state.IZAP = state.params[2] # 1000Z + A
-            state.LFS = state.params[3] # Level number of the nuclide
-            state.NR = state.params[4] # Number of energy ranges
-            state.NP = state.params[5] # Number of energy points
-            mp.multiplicities.append(state)
+        rxn.multiplicities = {}
+        for i in range(NS):
+            params, state = self._get_tab1_record()
+            QM = params[0] # Mass difference Q value (eV)
+            QI = params[1] # Reaction Q value (eV)
+            IZAP = params[2] # 1000Z + A
+            LFS = params[3] # Level number of the nuclide
+            rxn.multiplicities[LFS] = {'QM': QM, 'QI': QI, 'ZA': IZAP,
+                                       'values': state}
 
     def _read_production_xs(self, MT):
-        self.print_info(10, MT)
+        self._print_info(10, MT)
+        self._seek_mfmt(10, MT)
 
-        # Find file10
-        file10 = self.find_file(10)
-
-        # Create MT for resonances
-        rxn = ENDFReaction(MT)
-        file10.reactions.append(rxn)
-
-        # Find reaction
-        self.seek_mfmt(10, MT)
+        # Get Reaction instance
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.MFs.append(10)
 
         # Get head record
         items = self._get_head_record()
-        rxn.ZA = items[0]
-        rxn.AWR = items[1] # Atomic mass ratio
-        rxn.LIS = items[2] # Level number of the target
-        rxn.NS = items[4] # Number of final states
+        NS = items[4]  # Number of final states
 
-        rxn.xs = []
-        for i in range(rxn.NS):
-            state = self._get_tab1_record()
-            state.QM = state.params[0] # Mass difference Q value (eV)
-            state.QI = state.params[1] # Reaction Q value (eV)
-            state.IZAP = state.params[2] # 1000Z + A
-            state.LFS = state.params[3] # Level number of the nuclide
-            state.NR = state.params[4] # Number of energy ranges
-            state.NP = state.params[5] # Number of energy points
-            rxn.xs.append(state)
+        rxn.production = {}
+        for i in range(NS):
+            params, state = self._get_tab1_record()
+            QM = params[0]  # Mass difference Q value (eV)
+            QI = params[1]  # Reaction Q value (eV)
+            IZAP = params[2]  # 1000Z + A
+            LFS = params[3]  # Level number of the nuclide
+            rxn.production[LFS] = {'QM': QM, 'QI': QI, 'ZA': IZAP,
+                                   'values': state}
 
     def _get_text_record(self, line=None):
         if not line:
-            line = self.fh.readline()
-        if self.veryverbose:
+            line = self._fh.readline()
+        if self._veryverbose:
             print("Get TEXT record")
         HL = line[0:66]
         MAT = int(line[66:70])
@@ -1837,10 +1996,10 @@ class Evaluation(object):
         return [HL, MAT, MF, MT, NS]
 
     def _get_cont_record(self, line=None, skipC=False):
-        if self.veryverbose:
+        if self._veryverbose:
             print("Get CONT record")
         if not line:
-            line = self.fh.readline()
+            line = self._fh.readline()
         if skipC:
             C1 = None
             C2 = None
@@ -1859,8 +2018,8 @@ class Evaluation(object):
 
     def _get_head_record(self, line=None):
         if not line:
-            line = self.fh.readline()
-        if self.veryverbose:
+            line = self._fh.readline()
+        if self._veryverbose:
             print("Get HEAD record")
         ZA = int(endftod(line[:11]))
         AWR = endftod(line[11:22])
@@ -1876,7 +2035,7 @@ class Evaluation(object):
 
     def _get_list_record(self, onlyList=False):
         # determine how many items are in list
-        if self.veryverbose:
+        if self._veryverbose:
             print("Get LIST record")
         items = self._get_cont_record()
         NPL = items[4]
@@ -1885,7 +2044,7 @@ class Evaluation(object):
         itemsList = []
         m = 0
         for i in range((NPL-1)//6 + 1):
-            line = self.fh.readline()
+            line = self._fh.readline()
             toRead = min(6,NPL-m)
             for j in range(toRead):
                 val = endftod(line[0:11])
@@ -1898,81 +2057,35 @@ class Evaluation(object):
             return (items, itemsList)
 
     def _get_tab1_record(self):
-        if self.veryverbose:
+        if self._veryverbose:
             print("Get TAB1 record")
-        r = ENDFTab1Record()
-        r.read(self.fh)
-        return r
+        return Tab1.from_file(self._fh)
 
     def _get_tab2_record(self):
-        if self.veryverbose:
+        if self._veryverbose:
             print("Get TAB2 record")
         r = ENDFTab2Record()
-        r.read(self.fh)
+        r.read(self._fh)
         return r
 
-    def find_file(self, fileNumber):
-        for f in self.files:
-            if f.fileNumber == fileNumber:
-                return f
-        return None
-
-    def find_mt(self, MT):
-        for f in self.files:
-            for r in f.reactions:
-                if r.MT == MT:
-                    return r
-
-#    def look_for_files(self):
-#        files = set()
-#        self.fh.seek(0)
-#        for line in self.fh:
-#            try:
-#                fileNum = int(line[70:72])
-#                if fileNum == 0:
-#                    continue
-#            except ValueError:
-#                raise
-#            except IndexError:
-#                raise
-#            files.add(fileNum)
-#        print(files)
-
-#    def seek_file(self, fileNum):
-#        self.fh.seek(0)
-#        fileString = '{0:2}'.format(fileNum)
-#        while True:
-#            position = self.fh.tell()
-#            line = self.fh.readline()
-#            if line == '':
-#                # Reached EOF
-#                print('Could not find File {0}'.format(fileNum))
-#            if line[70:72] == fileString:
-#                self.fh.seek(position)
-#                break
-
-    def seek_mfmt(self, MF, MT):
-        self.fh.seek(0)
-        searchString = '{0:2}{1:3}'.format(MF, MT)
+    def _seek_mfmt(self, MF, MT):
+        self._fh.seek(self._start_position)
+        searchString = '{0:4}{1:2}{2:3}'.format(self.material, MF, MT)
         while True:
-            position = self.fh.tell()
-            line = self.fh.readline()
+            position = self._fh.tell()
+            line = self._fh.readline()
             if line == '':
                 # Reached EOF
-                if self.verbose:
+                if self._verbose:
                     print("Could not find MF={0}, MT={1}".format(MF, MT))
                 raise NotFound('Reaction')
-            if line[70:75] == searchString:
-                self.fh.seek(position)
+            if line[66:75] == searchString:
+                self._fh.seek(position)
                 break
 
-    def print_info(self, MF, MT):
-        if self.verbose:
+    def _print_info(self, MF, MT):
+        if self._verbose:
             print("Reading MF={0}, MT={1} {2}".format(MF, MT, label(MT)))
-
-    def __iter__(self):
-        for f in self.files:
-            yield f
 
     def __repr__(self):
         try:
@@ -1983,49 +2096,88 @@ class Evaluation(object):
             nuclide = "None"
         return "<{0} Evaluation: {1}>".format(name, nuclide)
 
-class ENDFTab1Record(object):
-    def __init__(self):
-        self.NBT = []
-        self.INT = []
-        self.x = []
-        self.y = []
 
-    def read(self, fh):
+class Tab1(object):
+    def __init__(self, nbt, interp, x, y):
+        """Create an ENDF Tab1 object."""
+
+        if len(nbt) == 0 and len(interp) == 0:
+            self.n_regions = 1
+            self.nbt = np.array([len(x)])
+            self.interp = np.array([2])  # linear-linear by default
+        else:
+            # NR=0 implies linear-linear interpolation by default
+            self.n_regions = len(nbt)
+            self.nbt = np.asarray(nbt, dtype=int)
+            self.interp = np.asarray(interp, dtype=int)
+
+        self.n_pairs = len(x)
+        self.x = np.asarray(x)  # Abscissa values
+        self.y = np.asarray(y)  # Ordinate values
+
+    @classmethod
+    def from_ndarray(cls, array, idx=0):
+        # Get number of regions and pairs
+        n_regions = int(array[idx])
+        n_pairs = int(array[idx + 1 + 2*n_regions])
+
+        # Get interpolation information
+        idx += 1
+        if n_regions > 0:
+            nbt = np.asarray(array[idx:idx + n_regions], dtype=int)
+            interp = np.asarray(array[idx + n_regions:idx + 2*n_regions], dtype=int)
+        else:
+            # Zero regions implies linear-linear interpolation by default
+            nbt = np.array([n_pairs])
+            interp = np.array([2])
+
+        # Get (x,y) pairs
+        idx += 2*n_regions + 1
+        x = array[idx:idx + n_pairs]
+        y = array[idx + n_pairs:idx + 2*n_pairs]
+
+        return cls(nbt, interp, x, y)
+
+    @classmethod
+    def from_file(cls, fh):
         # Determine how many interpolation regions and total points there are
         line = fh.readline()
         C1 = endftod(line[:11])
         C2 = endftod(line[11:22])
         L1 = int(line[22:33])
         L2 = int(line[33:44])
-        NR = int(line[44:55])
-        NP = int(line[55:66])
-        self.params = [C1, C2, L1, L2, NR, NP]
+        n_regions = int(line[44:55])
+        n_pairs = int(line[55:66])
+        params = [C1, C2, L1, L2]
 
         # Read the interpolation region data, namely NBT and INT
+        nbt = np.zeros(n_regions)
+        interp = np.zeros(n_regions)
         m = 0
-        for i in range((NR-1)//3 + 1):
+        for i in range((n_regions - 1)//3 + 1):
             line = fh.readline()
-            toRead = min(3,NR-m)
+            toRead = min(3, n_regions - m)
             for j in range(toRead):
-                NBT = int(line[0:11])
-                INT = int(line[11:22])
-                self.NBT.append(NBT)
-                self.INT.append(INT)
+                nbt[m] = int(line[0:11])
+                interp[m] = int(line[11:22])
                 line = line[22:]
-            m = m + toRead
+                m += 1
 
         # Read tabulated pairs x(n) and y(n)
+        x = np.zeros(n_pairs)
+        y = np.zeros(n_pairs)
         m = 0
-        for i in range((NP-1)//3 + 1):
+        for i in range((n_pairs - 1)//3 + 1):
             line = fh.readline()
-            toRead = min(3,NP-m)
+            toRead = min(3, n_pairs - m)
             for j in range(toRead):
-                x = endftod(line[:11])
-                y = endftod(line[11:22])
-                self.x.append(x)
-                self.y.append(y)
+                x[m] = endftod(line[:11])
+                y[m] = endftod(line[11:22])
                 line = line[22:]
-            m = m + toRead
+                m += 1
+
+        return params, cls(nbt, interp, x, y)
+
 
 class ENDFTab2Record(object):
     def __init__(self):
@@ -2056,269 +2208,26 @@ class ENDFTab2Record(object):
                 line = line[22:]
             m = m + toRead
 
-class ENDFRecord(object):
-    def __init__(self, fh):
-        if fh:
-            line = fh.readline()
-            self.read(line)
 
-class ENDFTextRecord(ENDFRecord):
-    """
-    An ENDFTextRecord is used either as the first entry on an ENDF tape (TPID)
-    or to give comments in File 1.
-    """
-
-    def __init__(self, fh):
-        super(ENDFTextRecord, self).__init__(fh)
-
-    def read(self, line):
-        HL = line[0:66]
-        MAT = int(line[66:70])
-        MF = int(line[70:72])
-        MT = int(line[72:75])
-        NS = int(line[75:80])
-        self.items = [HL, MAT, MF, MT, NS]
-
-class ENDFContRecord(ENDFRecord):
-    """
-    An ENDFContRecord is a control record.
-    """
-
-    def __init__(self, fh):
-        super(ENDFContRecord, self).__init__(fh)
-
-    def read(self, line):
-        C1 = endftod(line[:11])
-        C2 = endftod(line[11:22])
-        L1 = int(line[22:33])
-        L2 = int(line[33:44])
-        N1 = int(line[44:55])
-        N2 = int(line[55:66])
-        MAT = int(line[66:70])
-        MF = int(line[70:72])
-        MT = int(line[72:75])
-        NS = int(line[75:80])
-        self.items = [C1, C2, L1, L2, N1, N2, MAT, MF, MT, NS]
-
-#class ENDFEndRecord(ENDFRecord):
-#    """
-#    An ENDFEndRecord is an END record.
-#    """
-#
-#    def __init__(self, fh):
-#        super(ENDFEndRecord, self).__init__(fh)
-#
-#    def read(self, line):
-#        MF = int(line[70:72])
-#        MT = int(line[72:75])
-#        NS = int(line[75:80])
-#        self.items = [MF, MT, NS]
-#
-#class ENDFSendRecord(ENDFRecord):
-#    """
-#    An ENDFSendRecord is a SEND record.
-#    """
-#
-#    def __init__(self, fh):
-#        super(ENDFEndRecord, self).__init__(fh)
-#
-#    def read(self, line):
-#        super(ENDFSendRecord, self).read(self.line)
-#        if items[2] == 99999:
-#            print('SEND')
-#        else:
-#            raise NotFound('SEND')
-#
-#class ENDFFendRecord(ENDFRecord):
-#    """
-#    An ENDFFendRecord is a MEND record.
-#    """
-#
-#    def __init__(self, fh):
-#        super(ENDFEndRecord, self).__init__(fh)
-#
-#    def read(self, line):
-#        super(ENDFFendRecord, self).read(self.line)
-#        if (items[1] == 0) and (items[2] == 0):
-#            print('FEND')
-#        else:
-#            raise NotFound('FEND')
-#
-#class ENDFMendRecord(ENDFRecord):
-#    """
-#    An ENDFMendRecord is a MEND record.
-#    """
-#
-#    def __init__(self, fh):
-#        super(ENDFMEndRecord, self).__init__(fh)
-#
-#    def read(self, line):
-#        super(ENDFMendRecord, self).read(self.line)
-#        if (items[0] == 0) and (items[1] == 0) and (items[2] == 0):
-#            print('MEND')
-#        else:
-#            raise NotFound('MEND')
-#
-#class ENDFTendRecord(ENDFRecord):
-#    """
-#    An ENDFMendRecord is a MEND record.
-#    """
-#
-#    def __init__(self, fh):
-#        super(ENDFTEndRecord, self).__init__(fh)
-#
-#    def read(self, line):
-#        super(ENDFTendRecord, self).read(self.line)
-#        if (items[0] == -1) and (items[1] == 0) and (items[2] == 0):
-#            print('TEND')
-#        else:
-#            raise NotFound('TEND')
-#
-
-class ENDFHeadRecord(ENDFRecord):
-    """
-    An ENDFHeadRecord is the first in a section and has the same form as a
-    control record, except that C1 and C2 fields always contain ZA and AWR,
-    respectively.
-    """
-
-    def __init__(self, fh):
-        super(ENDFHeadRecord, self).__init__(fh)
-
-    def read(self, char * line):
-        za_str = line[:11]
-        ZA = int(endftod(za_str))
-        awr_str = line[11:22]
-        AWR = endftod(awr_str)
-        L1 = int(line[22:33])
-        L2 = int(line[33:44])
-        N1 = int(line[44:55])
-        N2 = int(line[55:66])
-        MAT = int(line[66:70])
-        MF = int(line[70:72])
-        MT = int(line[72:75])
-        NS = int(line[75:80])
-        self.items = [ZA, AWR, L1, L2, N1, N2, MAT, MF, MT, NS]
-
-class ENDFFile(object):
-    """Abstract class for an ENDF file within an ENDF evaluation."""
-
+class EnergyDistribution(object):
     def __init__(self):
-        self.reactions = []
+        pass
 
-    def __repr__(self):
-        try:
-            return "<ENDF File {0.fileNumber}: {0.ZA}>".format(self)
-        except:
-            return "<ENDF File {0.fileNumber}>".format(self)
-
-class ENDFFile1(ENDFFile):
-    """
-    File1 contains general information about an evaluated data set such as
-    descriptive data, number of neutrons per fission, delayed neutron data,
-    number of prompt neutrons per fission, and components of energy release due
-    to fission.
-    """
-
-    def __init__(self):
-        super(ENDFFile1,self).__init__()
-
-        self.fileNumber = 1
-
-class ENDFFile2(ENDFFile):
-    """
-    File2 contains resonance parameters including resolved resonance parameters,
-    unresolved resonance parameters, and prescribed procedures for resolved and
-    unresolved resonances.
-    """
-
-    def __init__(self):
-        super(ENDFFile2,self).__init__()
-
-        self.fileNumber = 2
-
-class ENDFFile3(ENDFFile):
-    """
-    File3 contains neutron cross sections and prescribed procedures for
-    inciddent neutrons.
-    """
-
-    def __init__(self):
-        super(ENDFFile3, self).__init__()
-        self.fileNumber = 3
-
-class ENDFFile4(ENDFFile):
-    """
-    File4 contains angular distributions of secondary particles.
-    """
-
-    def __init__(self):
-        self.fileNumber = 4
-
-class ENDFFile5(ENDFFile):
-    """
-    File5 contains energy distributions of secondary particles.
-    """
-
-    def __init__(self):
-        self.fileNumber = 5
-
-class ENDFFile6(ENDFFile):
-    """
-    File6 contains product energy-angle distributions.
-    """
-
-    def __init__(self):
-        self.fileNumber = 6
-
-class ENDFFile7(ENDFFile):
-    """
-    File7 contains thermal neutron scattering law data.
-    """
-
-    def __init__(self):
-        super(ENDFFile7,self).__init__()
-        self.fileNumber = 7
-
-class ENDFFile8(ENDFFile):
-    """
-    File8 contains radioactive decay data.
-    """
-
-    def __init__(self):
-        super(ENDFFile8,self).__init__()
-        self.fileNumber = 8
-
-class ENDFFile9(ENDFFile):
-    """
-    File9 contains multiplicites for production of radioactive elements.
-    """
-
-    def __init__(self):
-        super(ENDFFile9,self).__init__()
-        self.fileNumber = 9
-
-class ENDFFile10(ENDFFile):
-    """
-    File10 contains cross sections for production of radioactive nuclides.
-    """
-
-    def __init__(self):
-        super(ENDFFile10,self).__init__()
-        self.fileNumber = 10
-
-class ENDFReaction(ENDFFile):
+class Reaction(object):
     """A single MT record on an ENDF file."""
 
     def __init__(self, MT):
         self.MT = MT
+        self.MFs = []
 
     def __repr__(self):
         return "<ENDF Reaction: MT={0}, {1}>".format(self.MT, label(self.MT))
 
+
 class Resonance(object):
     def __init__(self):
         pass
+
 
 class BreitWigner(Resonance):
     def __init__(self):
@@ -2327,6 +2236,7 @@ class BreitWigner(Resonance):
     def __repr__(self):
         return "<Breit-Wigner Resonance: l={0.L} J={0.J} E={0.E}>".format(self)
 
+
 class ReichMoore(Resonance):
     def __init__(self):
         pass
@@ -2334,190 +2244,15 @@ class ReichMoore(Resonance):
     def __repr__(self):
         return "<Reich-Moore Resonance: l={0.L} J={0.J} E={0.E}>".format(self)
 
+
 class AdlerAdler(Resonance):
     def __init__(self):
         pass
 
+
 class RMatrixLimited(Resonance):
     def __init__(self):
         pass
-
-
-MTname = {1: "(n,total) Neutron total",
-          2: "(z,z0) Elastic scattering",
-          3: "(z,nonelas) Nonelastic neutron",
-          4: "(z,n) One neutron in exit channel",
-          5: "(z,anything) Miscellaneous",
-          10: "(z,contin) Total continuum reaction",
-          11: "(z,2nd) Production of 2n and d",
-          16: "(z,2n) Production of 2n",
-          17: "(z,3n) Production of 3n",
-          18: "(z,fiss) Particle-induced fission",
-          19: "(z,f) First-chance fission",
-          20: "(z,nf) Second chance fission",
-          21: "(z,2nf) Third-chance fission",
-          22: "(z,na) Production of n and alpha",
-          23: "(z,n3a) Production of n and 3 alphas",
-          24: "(z,2na) Production of 2n and alpha",
-          25: "(z,3na) Production of 3n and alpha",
-          27: "(n,abs) Absorption",
-          28: "(z,np) Production of n and p",
-          29: "(z,n2a) Production of n and 2 alphas",
-          30: "(z,2n2a) Production of 2n and 2 alphas",
-          32: "(z,nd) Production of n and d",
-          33: "(z,nt) Production of n and t",
-          34: "(z,n3He) Production of n and He-3",
-          35: "(z,nd2a) Production of n, d, and alpha",
-          36: "(z,nt2a) Production of n, t, and 2 alphas",
-          37: "(z,4n) Production of 4n",
-          38: "(z,3nf) Fourth-chance fission",
-          41: "(z,2np) Production of 2n and p",
-          42: "(z,3np) Production of 3n and p",
-          44: "(z,n2p) Production of n and 2p",
-          45: "(z,npa) Production of n, p, and alpha",
-          50: "(z,n0) Production of n, ground state",
-          51: "(z,n1) Production of n, 1st excited state",
-          52: "(z,n2) Production of n, 2nd excited state",
-          53: "(z,n3) Production of n, 3rd excited state",
-          54: "(z,n4) Production of n, 4th excited state",
-          55: "(z,n5) Production of n, 5th excited state",
-          56: "(z,n6) Production of n, 6th excited state",
-          57: "(z,n7) Production of n, 7th excited state",
-          58: "(z,n8) Production of n, 8th excited state",
-          59: "(z,n9) Production of n, 9th excited state",
-          60: "(z,n10) Production of n, 10th excited state",
-          61: "(z,n11) Production of n, 11th excited state",
-          62: "(z,n12) Production of n, 12th excited state",
-          63: "(z,n13) Production of n, 13th excited state",
-          64: "(z,n14) Production of n, 14th excited state",
-          65: "(z,n15) Production of n, 15th excited state",
-          66: "(z,n16) Production of n, 16th excited state",
-          67: "(z,n17) Production of n, 17th excited state",
-          68: "(z,n18) Production of n, 18th excited state",
-          69: "(z,n19) Production of n, 19th excited state",
-          70: "(z,n20) Production of n, 20th excited state",
-          71: "(z,n21) Production of n, 21st excited state",
-          72: "(z,n22) Production of n, 22nd excited state",
-          73: "(z,n23) Production of n, 23rd excited state",
-          74: "(z,n24) Production of n, 24th excited state",
-          75: "(z,n25) Production of n, 25th excited state",
-          76: "(z,n26) Production of n, 26th excited state",
-          77: "(z,n27) Production of n, 27th excited state",
-          78: "(z,n28) Production of n, 28th excited state",
-          79: "(z,n29) Production of n, 29th excited state",
-          80: "(z,n30) Production of n, 30th excited state",
-          81: "(z,n31) Production of n, 31st excited state",
-          82: "(z,n32) Production of n, 32nd excited state",
-          83: "(z,n33) Production of n, 33rd excited state",
-          84: "(z,n34) Production of n, 34th excited state",
-          85: "(z,n35) Production of n, 35th excited state",
-          86: "(z,n36) Production of n, 36th excited state",
-          87: "(z,n37) Production of n, 37th excited state",
-          88: "(z,n38) Production of n, 38th excited state",
-          89: "(z,n39) Production of n, 39th excited state",
-          90: "(z,n40) Production of n, 40th excited state",
-          91: "(z,nc) Production of n in continuum",
-          101: "(n,disap) Neutron disappeareance",
-          102: "(z,gamma) Radiative capture",
-          103: "(z,p) Production of p",
-          104: "(z,d) Production of d",
-          105: "(z,t) Production of t",
-          106: "(z,3He) Production of He-3",
-          107: "(z,a) Production of alpha",
-          108: "(z,2a) Production of 2 alphas",
-          109: "(z,3a) Production of 3 alphas",
-          111: "(z,2p) Production of 2p",
-          112: "(z,pa) Production of p and alpha",
-          113: "(z,t2a) Production of t and 2 alphas",
-          114: "(z,d2a) Production of d and 2 alphas",
-          115: "(z,pd) Production of p and d",
-          116: "(z,pt) Production of p and t",
-          117: "(z,da) Production of d and a",
-          151: "Resonance Parameters",
-          201: "(z,Xn) Total neutron production",
-          202: "(z,Xgamma) Total gamma production",
-          203: "(z,Xp) Total proton production",
-          204: "(z,Xd) Total deuteron production",
-          205: "(z,Xt) Total triton production",
-          206: "(z,X3He) Total He-3 production",
-          207: "(z,Xa) Total alpha production",
-          208: "(z,Xpi+) Total pi+ meson production",
-          209: "(z,Xpi0) Total pi0 meson production",
-          210: "(z,Xpi-) Total pi- meson production",
-          211: "(z,Xmu+) Total anti-muon production",
-          212: "(z,Xmu-) Total muon production",
-          213: "(z,Xk+) Total positive kaon production",
-          214: "(z,Xk0long) Total long-lived neutral kaon production",
-          215: "(z,Xk0short) Total short-lived neutral kaon production",
-          216: "(z,Xk-) Total negative kaon production",
-          217: "(z,Xp-) Total anti-proton production",
-          218: "(z,Xn-) Total anti-neutron production",
-          251: "Average cosine of scattering angle",
-          252: "Average logarithmic energy decrement",
-          253: "Average xi^2/(2*xi)",
-          451: "Desciptive data",
-          452: "Total neutrons per fission",
-          454: "Independent fission product yield",
-          455: "Delayed neutron data",
-          456: "Prompt neutrons per fission",
-          457: "Radioactive decay data",
-          458: "Energy release due to fission",
-          459: "Cumulative fission product yield",
-          460: "Delayed photon data",
-          500: "Total charged-particle stopping power",
-          501: "Total photon interaction",
-          502: "Photon coherent scattering",
-          504: "Photon incoherent scattering",
-          505: "Imaginary scattering factor",
-          506: "Real scattering factor",
-          515: "Pair production, electron field",
-          516: "Total pair production",
-          517: "Pair production, nuclear field",
-          522: "Photoelectric absorption",
-          523: "Photo-excitation cross section",
-          526: "Electro-atomic scattering",
-          527: "Electro-atomic bremsstrahlung",
-          528: "Electro-atomic excitation cross section",
-          533: "Atomic relaxation data",
-          534: "K (1s1/2) subshell",
-          535: "L1 (2s1/2) subshell",
-          536: "L2 (2p1/2) subshell",
-          537: "L3 (2p3/2) subshell",
-          538: "M1 (3s1/2) subshell",
-          539: "M2 (3p1/2) subshell",
-          540: "M3 (3p3/2) subshell",
-          541: "M4 (3d1/2) subshell",
-          542: "M5 (3d1/2) subshell",
-          543: "N1 (4s1/2) subshell",
-          544: "N2 (4p1/2) subshell",
-          545: "N3 (4p3/2) subshell",
-          546: "N4 (4d3/2) subshell",
-          547: "N5 (4d5/2) subshell",
-          548: "N6 (4f5/2) subshell",
-          549: "N7 (4f7/2) subshell",
-          550: "O1 (5s1/2) subshell",
-          551: "O2 (5p1/2) subshell",
-          552: "O3 (5p3/2) subshell",
-          553: "O4 (5d3/2) subshell",
-          554: "O5 (5d5/2) subshell",
-          555: "O6 (5f5/2) subshell",
-          556: "O7 (5f7/2) subshell",
-          557: "O8 (5g7/2) subshell",
-          558: "O9 (5g9/2) subshell",
-          559: "P1 (6s1/2) subshell",
-          560: "P2 (6p1/2) subshell",
-          561: "P3 (6p3/2) subshell",
-          562: "P4 (6d3/2) subshell",
-          563: "P5 (6d5/2) subshell",
-          564: "P6 (6f5/2) subshell",
-          565: "P7 (6f7/2) subshell",
-          566: "P8 (6g7/2) subshell",
-          567: "P9 (6g9/2) subshell",
-          568: "P10 (6h9/2) subshell",
-          569: "P11 (6h11/2) subshell",
-          570: "Q1 (7s1/2) subshell",
-          571: "Q2 (7p1/2) subshell",
-          572: "Q3 (7p3/2) subshell"}
 
 
 class NotFound(Exception):
