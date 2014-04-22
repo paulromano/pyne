@@ -113,14 +113,14 @@ class Library(object):
             # Read name, atomic mass ratio, temperature, date, comment, and
             # material
             name, awr, temp, date, comment, mat = \
-                struct.unpack('=10sdd10s70s10s', self.f.read(116))
+                struct.unpack(str('=10sdd10s70s10s'), self.f.read(116))
             name = name.strip()
 
             # Read ZAID/awr combinations
-            data = struct.unpack('=' + 16*'id', self.f.read(192))
+            data = struct.unpack(str('=' + 16*'id'), self.f.read(192))
 
             # Read NXS
-            nxs = list(struct.unpack('=16i', self.f.read(64)))
+            nxs = list(struct.unpack(str('=16i'), self.f.read(64)))
 
             # Determine length of XSS and number of records
             length = nxs[0]
@@ -147,11 +147,11 @@ class Library(object):
             self.tables[name] = table
 
             # Read JXS
-            table.jxs = list(struct.unpack('=32i', self.f.read(128)))
+            table.jxs = list(struct.unpack(str('=32i'), self.f.read(128)))
 
             # Read XSS
             self.f.seek(start_position + recl_length)
-            table.xss = list(struct.unpack('={0}d'.format(length),
+            table.xss = list(struct.unpack(str('={0}d').format(length),
                                            self.f.read(length*8)))
 
             # Insert empty object at beginning of NXS, JXS, and XSS
