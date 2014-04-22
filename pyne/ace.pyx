@@ -28,6 +28,7 @@ from bisect import bisect_right
 from pyne cimport nucname
 from pyne import nucname
 from pyne.rxname import label
+from pyne.endf import Tab1
 
 # fromstring func should depend on numpy verison
 from pyne._utils import fromstring_split, fromstring_token
@@ -284,8 +285,51 @@ class AceTable(object):
 
     def _read_all(self):
         raise NotImplementedError
-        
-        
+
+    def _get_energy_distribution(self, location_dist, location_start):
+        """Returns an EnergyDistribution object from data read in starting at
+        location_start.
+        """
+
+        # Set starting index for energy distribution
+        idx = location_dist + location_start - 1
+
+        location_next_law = int(self.xss[idx])
+        law = int(self.xss[idx + 1])
+        location_data = int(self.xss[idx + 2])
+
+        # Probability of law valifity
+        p_law_validity = Tab1.from_ndarray(self.xss, idx + 3)
+
+        # Position index for reading law data
+        idx = location_dist + location_data - 1
+
+        # Chcek for valid and supported ACE law
+        if law not in _distributions:
+            raise IOError("Unsupported ACE secondary energy "
+                          "distribution law {0}".format(law))
+
+        # Create instantiation of corresponding class
+        edist = _distributions[law]()
+
+        # Parse energy distribution data
+        if law in (4, 44, 61, 67):
+            edist.read(self.xss, idx, location_dist)
+        else:
+            edist.read(self.xss, idx)
+
+        # Set law and probability of law validity
+        edist.law = law
+        edist.p_law_validity = p_law_validity
+
+        # Read next law if present
+        if location_next_law > 0:
+            edist.next = self._get_energy_distribution(
+                location_dist, location_next_law)
+
+        return edist
+
+
 class NeutronTable(AceTable):
     """A NeutronTable object contains continuous-energy neutron interaction data
     read from an ACE-formatted Type I table. These objects are not normally
@@ -372,14 +416,9 @@ class NeutronTable(AceTable):
         self._read_angular_distributions()
         self._read_energy_distributions()
         self._read_gpd()
-        self._read_mtrp()
-        self._read_lsigp()
-        self._read_sigp()
-        self._read_landp()
-        self._read_andp()
-        # Read LDLWP block
-        # Read DLWP block
-        # Read YP block
+        self._read_photon_cross_sections()
+        self._read_photon_angular_distributions()
+        self._read_photon_energy_distributions()
         self._read_yp()
         self._read_fis()
         self._read_unr()
@@ -448,11 +487,12 @@ class NeutronTable(AceTable):
         """Read the NU block -- this contains information on the prompt
         and delayed neutron precursor yields, decay constants, etc
         """
-        cdef int ind, i, jxs2, KNU, LNU, NR, NE, NC
+        cdef int idx, i, jxs2, KNU, LNU, NR, NE, NC
 
-        jxs2 = self.jxs[2]
+        self.nu = {}
 
         # No NU block
+        jxs2 = self.jxs[2]
         if jxs2 == 0:
             return
 
@@ -461,106 +501,85 @@ class NeutronTable(AceTable):
             KNU = jxs2
             LNU = int(self.xss[KNU])
 
-            # Polynomial function form of nu
+            whichnu = 'prompt' if self.jxs[24] > 0 else 'total'
+            self.nu[whichnu] = {}
+
             if LNU == 1:
-                self.nu_t_type = "polynomial"
+                # Polynomial function form of nu
+                self.nu[whichnu]['form'] = 'polynomial'
                 NC = int(self.xss[KNU+1])
-                coeffs = self.xss[KNU+2 : KNU+2+NC]
-                
-            # Tabular data form of nu
+                self.nu[whichnu]['coefficients'] = self.xss[KNU+2:KNU+2+NC]
             elif LNU == 2:
-                self.nu_t_type = "tabular"
-                NR = int(self.xss[KNU+1])
-                if NR > 0:
-                    interp_NBT = self.xss[KNU+2    : KNU+2+NR  ]
-                    interp_INT = self.xss[KNU+2+NR : KNU+2+2*NR]
-                NE = int(self.xss[KNU+2+2*NR])
-                self.nu_t_energy = self.xss[KNU+3+2*NR    : KNU+3+2*NR+NE  ]
-                self.nu_t_value  = self.xss[KNU+3+2*NR+NE : KNU+3+2*NR+2*NE]
+                # Tabular data form of nu
+                self.nu[whichnu]['form'] = 'tabular'
+                self.nu[whichnu]['values'] = Tab1.from_ndarray(self.xss, KNU + 1)
+
         # Both prompt nu and total nu
         elif self.xss[jxs2] < 0:
             KNU = jxs2 + 1
             LNU = int(self.xss[KNU])
+            self.nu['prompt'] = {}
 
-            # Polynomial function form of nu
             if LNU == 1:
-                self.nu_p_type = "polynomial"
+                # Polynomial function form of nu
+                self.nu['prompt']['form'] = 'polynomial'
                 NC = int(self.xss[KNU+1])
-                coeffs = self.xss[KNU+2 : KNU+2+NC]
-                
-            # Tabular data form of nu
+                self.nu['prompt']['coefficients'] = self.xss[KNU+2:KNU+2+NC]
             elif LNU == 2:
-                self.nu_p_type = "tabular"
-                NR = int(self.xss[KNU+1])
-                if NR > 0:
-                    interp_NBT = self.xss[KNU+2    : KNU+2+NR  ]
-                    interp_INT = self.xss[KNU+2+NR : KNU+2+2*NR]
-                NE = int(self.xss[KNU+2+2*NR])
-                self.nu_p_energy = self.xss[KNU+3+2*NR    : KNU+3+2*NR+NE  ]
-                self.nu_p_value  = self.xss[KNU+3+2*NR+NE : KNU+3+2*NR+2*NE]
-                
+                # Tabular data form of nu
+                self.nu['prompt']['form'] = 'tabular'
+                self.nu['prompt']['values'] = Tab1.from_ndarray(self.xss, KNU + 1)
+
             KNU = jxs2 + int(abs(self.xss[jxs2])) + 1
             LNU = int(self.xss[KNU])
+            self.nu['total'] = {}
 
-            # Polynomial function form of nu
             if LNU == 1:
-                self.nu_t_type = "polynomial"
+                # Polynomial function form of nu
+                self.nu['total']['form'] = 'polynomial'
                 NC = int(self.xss[KNU+1])
-                coeffs = self.xss[KNU+2 : KNU+2+NC]
-                
-            # Tabular data form of nu
+                self.nu['total']['coefficients'] = self.xss[KNU+2:KNU+2+NC]
             elif LNU == 2:
-                self.nu_t_type = "tabular"
-                NR = int(self.xss[KNU+1])
-                if NR > 0:
-                    interp_NBT = self.xss[KNU+2    : KNU+2+NR  ]
-                    interp_INT = self.xss[KNU+2+NR : KNU+2+2*NR]
-                NE = int(self.xss[KNU+2+2*NR])
-                self.nu_t_energy = self.xss[KNU+3+2*NR    : KNU+3+2*NR+NE  ]
-                self.nu_t_value  = self.xss[KNU+3+2*NR+NE : KNU+3+2*NR+2*NE]
-    
+                # Tabular data form of nu
+                self.nu['total']['form'] = 'tabular'
+                self.nu['total']['values'] = Tab1.from_ndarray(self.xss, KNU + 1)
+
         # Check for delayed nu data
         if self.jxs[24] > 0:
+            self.nu['delayed'] = {}
+            self.nu['delayed']['form'] = 'tabular'
             KNU = self.jxs[24]
-            NR = int(self.xss[KNU+1])
-            if NR > 0:
-                interp_NBT = self.xss[KNU+2    : KNU+2+NR  ]
-                interp_INT = self.xss[KNU+2+NR : KNU+2+2*NR]
-            NE = int(self.xss[KNU+2+2*NR])
-            self.nu_d_energy = self.xss[KNU+3+2*NR    : KNU+3+2*NR+NE  ]
-            self.nu_d_value  = self.xss[KNU+3+2*NR+NE : KNU+3+2*NR+2*NE]
+            self.nu['delayed']['values'] = Tab1.from_ndarray(self.xss, KNU + 1)
 
             # Delayed neutron precursor distribution
-            self.nu_d_precursor_const = {}
-            self.nu_d_precursor_energy = {}
-            self.nu_d_precursor_prob = {}
+            self.nu['delayed']['precursor_const'] = []
+            self.nu['delayed']['precursor_prob'] = []
             i = self.jxs[25]
             n_group = self.nxs[8]
+            self.nu['delayed']['n_precursor_groups'] = n_group
             for group in range(n_group):
-                self.nu_d_precursor_const[group] = self.xss[i]
-                NR = int(self.xss[i+1])
-                if NR > 0:
-                    interp_NBT = self.xss[i+2    : i+2+NR]
-                    interp_INT = self.xss[i+2+NR : i+2+2*NR]
-                NE = int(self.xss[i+2+2*NR])
-                self.nu_d_precursor_energy[group] = self.xss[i+3+2*NR    : i+3+2*NR+NE  ]
-                self.nu_d_precursor_prob[group]   = self.xss[i+3+2*NR+NE : i+3+2*NR+2*NE]
-                i = i+3+2*NR+2*NE
+                self.nu['delayed']['precursor_const'].append(self.xss[i])
+                self.nu['delayed']['precursor_prob'].append(
+                    Tab1.from_ndarray(self.xss, i + 1))
+
+                # Advance position
+                nr = int(self.xss[i + 1])
+                ne = int(self.xss[i + 2 + 2*nr])
+                i += 3 + 2*nr + 2*ne
 
             # Energy distribution for delayed fission neutrons
             LED = self.jxs[26]
-            self.nu_d_energy_dist = []
+            self.nu['delayed']['energy_dist'] = []
             for group in range(n_group):
-                location_start = self.xss[LED + group]
+                location_start = int(self.xss[LED + group])
                 energy_dist = self._get_energy_distribution(
-                    location_start, delayed_n=True)
-                self.nu_d_energy_dist.append(energy_dist)
-                    
+                    self.jxs[27], location_start)
+                self.nu['delayed']['energy_dist'].append(energy_dist)
 
     def _read_angular_distributions(self):
         """Find the angular distribution for each reaction MT
         """
-        cdef int ind, i, j, n_reactions, n_energies, n_bins
+        cdef int idx, i, j, n_reactions, n_energies, n_bins
         cdef dict ang_cos, ang_pdf, ang_cdf
 
         # Number of reactions with secondary neutrons (including elastic
@@ -580,48 +599,14 @@ class NeutronTable(AceTable):
                 # No angular distribution data are given for this
                 # reaction, isotropic scattering is asssumed (in CM if
                 # TY < 0 and in LAB if TY > 0)
+                reaction.angular_dist = AngularDistribution.isotropic(
+                    np.array([self.energy[0], self.energy[-1]]))
                 continue
 
-            ind = self.jxs[9] + loc
+            idx = self.jxs[9] + loc - 1
 
-            # Number of energies at which angular distributions are tabulated
-            n_energies = int(self.xss[ind - 1])
-
-            # Incoming energy grid
-            reaction.ang_energy_in = self.xss[ind:ind + n_energies]
-            ind += n_energies
-
-            # Read locations for angular distributions
-            locations = np.asarray(self.xss[ind:ind + n_energies], dtype=int)
-            ind += n_energies
-
-            ang_cos = {}
-            ang_pdf = {}
-            ang_cdf = {}
-            for j, location in enumerate(locations):
-                if location > 0:
-                    # Equiprobable 32 bin distribution
-                    # print([reaction,'equiprobable'])
-                    ang_cos[j] = self.xss[ind:ind + 33]
-                    ind += 33
-                elif location < 0:
-                    # Tabular angular distribution
-                    JJ = int(self.xss[ind])
-                    n_bins = int(self.xss[ind + 1])
-                    ind += 2
-                    ang_dat = self.xss[ind:ind + 3*n_bins]
-                    ang_dat.shape = (3, n_bins)
-                    ang_cos[j], ang_pdf[j], ang_cdf[j] = ang_dat
-                    ind += 3 * n_bins
-                else:
-                    # Isotropic angular distribution
-                    ang_cos = np.array([-1., 0., 1.])
-                    ang_pdf = np.array([0.5, 0.5, 0.5])
-                    ang_cdf = np.array([0., 0.5, 1.])
-
-            reaction.ang_cos = ang_cos
-            reaction.ang_pdf = ang_pdf
-            reaction.ang_cdf = ang_cdf
+            reaction.angular_dist = AngularDistribution()
+            reaction.angular_dist.read(self.xss, idx, self.jxs[9])
 
     def _read_energy_distributions(self):
         """Determine the energy distribution for secondary neutrons for
@@ -639,432 +624,13 @@ class NeutronTable(AceTable):
             location_start = int(self.xss[self.jxs[10] + i])
 
             # Read energy distribution data
-            reaction.energy_dist = self._get_energy_distribution(location_start)
-
-    def _get_energy_distribution(self, location_start, delayed_n=False):
-        """Returns an EnergyDistribution object from data read in starting at
-        location_start.
-        """
-
-        cdef int ind, i, n_reactions, NE, n_regions, location_next_law, law, location_data, NPE, NPA
-
-        # Create EnergyDistribution object
-        edist = EnergyDistribution()
-
-        # Determine location of energy distribution
-        if delayed_n:
-            location_dist = self.jxs[27]
-        else:
-            location_dist = self.jxs[11]
-
-        # Set starting index for energy distribution
-        ind = location_dist + location_start - 1
-
-        location_next_law = int(self.xss[ind])
-        law = int(self.xss[ind+1])
-        location_data = int(self.xss[ind+2])
-
-        # Number of interpolation regions for law applicability regime
-        n_regions = int(self.xss[ind+3])
-        ind += 4
-        if n_regions > 0:
-            dat = np.asarray(self.xss[ind:ind + 2*n_regions], dtype=int)
-            dat.shape = (2, n_regions)
-            interp_NBT, interp_INT = dat
-            ind += 2 * n_regions
-
-        # Determine tabular energy points and probability of law
-        # validity
-        NE = int(self.xss[ind])
-        dat = self.xss[ind+1:ind+1+2*NE]
-        dat.shape = (2, NE)
-        edist.energy, edist.pvalid = dat
-
-        edist.law = law
-        ind = location_dist + location_data - 1
-
-        if law == 1:
-            # Tabular equiprobable energy bins (ENDF Law 1)
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            # Number of outgoing energies in each E_out table
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            ind += 1 + NE
-
-            # Read E_out tables
-            NET = int(self.xss[ind])
-            dat = self.xss[ind+1:ind+1+3*NET]
-            dat.shape = (3, NET)
-            self.e_dist_energy_out1, self.e_dist_energy_out2, \
-                                     self.e_dist_energy_outNE = dat
-            ind += 1 + 3 * NET
-        elif law == 2:
-            # Discrete photon energy
-            self.e_dist_LP = int(self.xss[ind])
-            self.e_dist_EG = self.xss[ind+1]
-            ind += 2
-        elif law == 3:
-            # Level scattering (ENDF Law 3)
-            edist.data = self.xss[ind:ind+2]
-            ind += 2
-        elif law == 4:
-            # Continuous tabular distribution (ENDF Law 1)
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            # Number of outgoing energies in each E_out table
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            L = self.xss[ind+1+NE:ind+1+2*NE]
-            ind += 1 + 2*NE
-
-            nps = []
-            edist.intt = []        # Interpolation scheme (1=hist, 2=lin-lin)
-            edist.energy_out = []  # Outgoing E grid for each incoming E
-            edist.pdf = []         # Probability dist for " " "
-            edist.cdf = []         # Cumulative dist for " " "
-            for i in range(NE):
-                INTTp = int(self.xss[ind])
-                if INTTp > 10:
-                    INTT = INTTp % 10
-                    ND = (INTTp - INTT)/10
-                else:
-                    INTT = INTTp
-                    ND = 0
-                edist.intt.append(INTT)
-                #if ND > 0:
-                #    print [reaction, ND, INTT]
-
-                NP = int(self.xss[ind+1])
-                nps.append(NP)
-                dat = self.xss[ind+2:ind+2+3*NP]
-                dat.shape = (3, NP)
-                edist.energy_out.append(dat[0])
-                edist.pdf.append(dat[1])
-                edist.cdf.append(dat[2])
-                ind += 2 + 3*NP
-
-            # convert to arrays if possible
-            edist.intt = np.array(edist.intt)
-            nps = np.array(nps)
-            if all((nps[1:] - nps[:-1]) == 0):
-                edist.energy_out = np.array(edist.energy_out)
-                edist.pdf = np.array(edist.pdf)
-                edist.cdf = np.array(edist.cdf)
-        elif law == 5:
-            # General evaporation spectrum (ENDF-5 File 5 LF=5)
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-                
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            edist.T = self.xss[ind+1+NE:ind+1+2*NE]
-            ind += 1+ 2*NE
-
-            NET = int(self.xss[ind])
-            edist.X = self.xss[ind+1:ind+1+NET]
-            ind += 1 + NET
-        elif law == 7:
-            # Simple Maxwell fission spectrum (ENDF-6 File 5 LF=7) 
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            edist.T = self.xss[ind+1+NE:ind+1+2*NE]
-            edist.U = self.xss[ind+1+2*NE]
-            ind += 2 + 2*NE
-        elif law == 9:
-            # Evaporation spectrum (ENDF-6 File 5 LF=9)
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            edist.T = self.xss[ind+1+NE:ind+1+2*NE]
-            edist.U = self.xss[ind+1+2*NE]
-            ind += 2 + 2*NE
-        elif law == 11:
-            # Energy dependent Watt spectrum (ENDF-6 File 5 LF=11)
-            # Interpolation scheme between a's    
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBTa, edist.INTa = dat
-                ind += 2 * n_regions                    
-
-            # Incident energy table and tabulated a's
-            NE = int(self.xss[ind])
-            edist.energya_in = self.xss[ind+1:ind+1+NE]
-            edist.a = self.xss[ind+1+NE:ind+1+2*NE]
-            ind += 1 + 2*NE
-
-            # Interpolation scheme between b's
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBTb, edist.INTb = dat
-                ind += 2 * n_regions                    
-
-            # Incident energy table and tabulated b's
-            NE = int(self.xss[ind])
-            edist.energyb_in = self.xss[ind+1:ind+1+NE]
-            edist.b = self.xss[ind+1+NE:ind+1+2*NE]
-
-            edist.U = self.xss[ind+1+2*NE]
-            ind += 2 + 2*NE
-        elif law == 22:
-            # Tabular linear functions (UK Law 2)
-            # Interpolation scheme (not used in MCNP)
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            # Number of incident energies
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            LOCE = np.asarray(self.xss[ind+1+NE:ind+1+2*NE], dtype=int)
-            ind += 1 + 2*NE
-
-            # Read linear functions
-            nfs = []
-            edist.P = []
-            edist.T = []
-            edist.C = []
-            for i in range(NE):
-                NF = int(self.xss[ind])
-                nfs.append(NF)
-                dat = self.xss[ind+1:ind+1+3*NF]
-                dat.shape = (3, NF)
-                edist.P.append(dat[0])
-                edist.T.append(dat[1])
-                edist.C.append(dat[2])
-                ind += 1 + 3*NF
-
-            # convert to arrays if possible
-            nfs = np.array(nfs)
-            if all((nfs[1:] - nfs[:-1]) == 0):
-                edist.P = np.array(edist.P)
-                edist.T = np.array(edist.T)
-                edist.C = np.array(edist.C)
-        elif law == 24:
-            # From UK Law 6
-            # Interpolation scheme (not used in MCNP)
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            # Number of incident energies
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            ind += 1 + NE
-                
-            # Outgoing energy tables
-            NET = int(self.xss[ind])
-            edist.T = self.xss[ind+1:ind+1+NE*NET]
-            edist.T.shape = (NE, NET)
-            ind += 1 + NE*NET
-        elif law == 44:
-            # Kalbach-87 Formalism (ENDF File 6 Law 1, LANG=2)
-            # Interpolation scheme
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            # Number of outgoing energies in each E_out table
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            L = np.asarray(self.xss[ind+1+NE:ind+1+2*NE], dtype=int)
-            ind += 1 + 2*NE
-
-            nps = []
-            edist.intt = []        # Interpolation scheme (1=hist, 2=lin-lin)
-            edist.energy_out = []  # Outgoing E grid for each incoming E
-            edist.pdf = []         # Probability dist for " " "
-            edist.cdf = []         # Cumulative dist for " " "
-            edist.frac = []        # Precompound fraction for " " "
-            edist.ang = []         # Angular distribution slope for " " "
-            for i in range(NE):
-                INTTp = int(self.xss[ind])
-                if INTTp > 10:
-                    INTT = INTTp % 10
-                    ND = (INTTp - INTT)/10
-                else:
-                    INTT = INTTp
-                edist.intt.append(INTT)
-
-                NP = int(self.xss[ind+1])
-                nps.append(NP)
-                ind += 2
-
-                dat = self.xss[ind:ind+5*NP]
-                dat.shape = (5, NP)
-                edist.energy_out.append(dat[0])
-                edist.pdf.append(dat[1])
-                edist.cdf.append(dat[2])
-                edist.frac.append(dat[3])
-                edist.ang.append(dat[4])
-                ind += 5*NP
-
-            # convert to arrays if possible
-            edist.intt = np.array(edist.intt)
-            nps = np.array(nps)
-            if all((nps[1:] - nps[:-1]) == 0):
-                edist.energy_out = np.array(edist.energy_out)
-                edist.pdf = np.array(edist.pdf)
-                edist.cdf = np.array(edist.cdf)
-        elif law == 61:
-            # Like 44, but tabular distribution instead of Kalbach-87
-            # Interpolation scheme
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            # Number of outgoing energies in each E_out table
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            L = np.asarray(self.xss[ind+1+NE:ind+1+2*NE], dtype=int)
-            ind += 1 + 2*NE
-
-            npes = []
-            edist.intt = []        # Interpolation scheme (1=hist, 2=lin-lin)
-            edist.energy_out = []  # Outgoing E grid for each incoming E
-            edist.pdf = []         # Probability dist for " " "
-            edist.cdf = []         # Cumulative dist for " " "
-
-            npas = []
-            edist.a_dist_intt = []
-            edist.a_dist_mu_out = [] # Cosine scattering angular grid
-            edist.a_dist_pdf = []    # Probability dist function
-            edist.a_dist_cdf = []
-            for i in range(NE):
-                INTTp = int(self.xss[ind])
-                if INTTp > 10:
-                    INTT = INTTp % 10
-                    ND = (INTTp - INTT)/10
-                else:
-                    INTT = INTTp
-                edist.intt.append(INTT)
-
-                # Secondary energy distribution
-                NPE = int(self.xss[ind+1])
-                npes.append(NPE)
-                dat = self.xss[ind+2:ind+2+4*NPE]
-                dat.shape = (4, NPE)
-                edist.energy_out.append(dat[0])
-                edist.pdf.append(dat[1])
-                edist.cdf.append(dat[2])
-                LC = np.asarray(dat[3], dtype=int)
-                ind += 2 + 4*NPE
-
-                # Secondary angular distribution
-                edist.a_dist_intt.append([])
-                edist.a_dist_mu_out.append([])
-                edist.a_dist_pdf.append([])
-                edist.a_dist_cdf.append([])
-                for j in range(NPE):
-                    edist.a_dist_intt[-1].append(int(self.xss[ind]))
-                    NPA = int(self.xss[ind+1])
-                    npas.append(NPA)
-                    dat = self.xss[ind+2:ind+2+3*NPA]
-                    dat.shape = (3, NPA)
-                    edist.a_dist_mu_out[-1].append(dat[0])
-                    edist.a_dist_pdf[-1].append(dat[1])
-                    edist.a_dist_cdf[-1].append(dat[2])
-                    ind += 2 + 3*NPA
-
-            # convert to arrays if possible
-            edist.intt = np.array(edist.intt)
-            npes = np.array(npes)
-            npas = np.array(npas)
-            if all((npes[1:] - npes[:-1]) == 0):
-                edist.energy_out = np.array(edist.energy_out)
-                edist.pdf = np.array(edist.pdf)
-                edist.cdf = np.array(edist.cdf)
-
-                edist.a_dist_intt = np.array(edist.a_dist_intt)
-                if all((npas[1:] - npas[:-1]) == 0):
-                    edist.a_dist_mu_out = np.array(edist.a_dist_mu_out)
-                    edist.a_dist_pdf = np.array(edist.a_dist_pdf)
-                    edist.a_dist_cdf = np.array(edist.a_dist_cdf)
-        elif law == 66:
-            # N-body phase space distribution (ENDF File 6 Law 6)
-            edist.nbodies = int(self.xss[ind])
-            edist.massratio = self.xss[ind+1]
-            ind += 2
-        elif law == 67:
-            # Laboratory angle-energy law (ENDF File 6 Law 7)
-            # Interpolation scheme
-            n_regions = int(self.xss[ind])
-            ind += 1
-            if n_regions > 0:
-                dat = np.asarray(self.xss[ind:ind+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                edist.NBT, edist.INT = dat
-                ind += 2 * n_regions                    
-
-            # Number of outgoing energies in each E_out table
-            NE = int(self.xss[ind])
-            edist.energy_in = self.xss[ind+1:ind+1+NE]
-            L = np.asarray(self.xss[ind+1+NE:ind+1+2*NE], dtype=int)
-            ind += 1 + 2*NE
-                    
-        # TODO: Read rest of data
-
-        return edist
-        
+            reaction.energy_dist = self._get_energy_distribution(
+                self.jxs[11], location_start)
 
     def _read_gpd(self):
         """Read total photon production cross section.
         """
-        cdef int ind, jxs12, NE
+        cdef int idx, jxs12, NE
 
         jxs12 = self.jxs[12]
         if jxs12 != 0:
@@ -1072,8 +638,8 @@ class NeutronTable(AceTable):
             NE = self.nxs[3]
 
             # Read total photon production cross section
-            ind = jxs12
-            self.sigma_photon = self.xss[ind:ind+NE]
+            idx = jxs12
+            self.sigma_photon = self.xss[idx:idx+NE]
 
             # The MCNP manual also specifies that this block contains secondary
             # photon energies based on a 30x20 matrix formulation. However, the
@@ -1094,123 +660,96 @@ class NeutronTable(AceTable):
             # # Read equiprobable outgoing photon energies
             # # Equiprobable outgoing photon energies for incident neutron
             # # energy i
-            # e_out_photon_equi = self.xss[ind:ind+600]
+            # e_out_photon_equi = self.xss[idx:idx+600]
             # if len(e_out_photon_equi) == 600:
             #     self.e_out_photon_equi = e_out_photon_equi
             #     self.e_out_photon_equi.shape = (30, 20)
 
-    def _read_mtrp(self):
-        """Get the list of reaction MTs for photon-producing reactions for this
-        cross-section table. The MT values are somewhat arbitrary.
-        """
-        LMT = self.jxs[13]
-        NMT = self.nxs[6]
-        mts = np.asarray(self.xss[LMT:LMT+NMT], dtype=int)
-        rxs = [(mt, Reaction(mt, self)) for mt in mts]
-        self.photon_reactions.update(rxs)
+    def _read_photon_cross_sections(self):
+        """Read cross sections for each photon-production reaction"""
 
-    def _read_lsigp(self):
-        """Determine location of cross sections for each photon-producing reaction
-        MT.
-        """
-        LXS = self.jxs[14]
-        NMT = self.nxs[6]
-        loca = np.asarray(self.xss[LXS:LXS+NMT], dtype=int)
-        for loc, rxn in zip(loca, self.photon_reactions.values()):
-            rxn.LOCA = loc
+        n_photon_reactions = self.nxs[6]
+        mts = np.asarray(self.xss[self.jxs[13]:self.jxs[13] + 
+                                  n_photon_reactions], dtype=int)
 
-    def _read_sigp(self):
-        """Read cross-sections for each photon-producing reaction MT.
-        """
-        cdef int ind, jxs15, MFTYPE, n_regions, NE
+        reactions = [(mt, Reaction(mt, self)) for mt in mts]
+        self.photon_reactions.update(reactions)
 
-        jxs15 = self.jxs[15]
-        for rxn in self.photon_reactions.values():
-            ind = jxs15 + rxn.LOCA - 1
-            MFTYPE = int(self.xss[ind])
-            ind += 1
+        for i, rxn in enumerate(self.photon_reactions.values()):
+            loca = int(self.xss[self.jxs[14] + i])
+            idx = self.jxs[15] + loca - 1
+            rxn.mftype = int(self.xss[idx])
+            idx += 1
 
-            if MFTYPE == 12 or MFTYPE == 16:
+            if rxn.mftype == 12 or rxn.mftype == 16:
                 # Yield data taken from ENDF File 12 or 6
-                MTMULT = int(self.xss[ind])
-                ind += 1
-    
-                # ENDF interpolation parameters
-                n_regions = int(self.xss[ind])
-                dat = np.asarray(self.xss[ind+1:ind+1+2*n_regions], dtype=int)
-                dat.shape = (2, n_regions)
-                NBT, INT = dat
-                ind += 1 + 2*n_regions
+                rxn.mtmult = int(self.xss[idx])
 
-                # Energy-dependent yield
-                NE = int(self.xss[ind])
-                dat = self.xss[ind+1:ind+1+2*NE]
-                dat.shape = (2, NE)
-                rxn.e_yield, rxn.photon_yield = dat
-                ind += 1 + 2*NE
-            elif MFTYPE == 13:
-                # Cross-section data from ENDF File 13
+                # Read photon yield as function of energy
+                rxn.photon_yield = Tab1.from_ndarray(self.xss, idx + 1)
+
+            elif rxn.mftype == 13:
+                # Cross section data from ENDF File 13
+
                 # Energy grid index at which data starts
-                rxn.IE = int(self.xss[ind])
+                rxn.IE = int(self.xss[idx])
 
                 # Cross sections
-                NE = int(self.xss[ind+1])
-                self.sigma = self.xss[ind+2:ind+2+NE]
-                ind += 2 + NE
+                n_energy = int(self.xss[idx + 1])
+                rxn.sigma = self.xss[idx + 2:idx + 2 + n_energy]
             else:
-                raise ValueError("MFTYPE must be 12, 13, 16. Got {}".format(MFTYPE))
+                raise ValueError("MFTYPE must be 12, 13, 16. Got {0}".format(
+                        rxn.mftype))
 
-    def _read_landp(self):
-        """Determine location of angular distribution for each photon-producing
-        reaction MT.
-        """
-        jxs16 = self.jxs[16]
-        NMT = self.nxs[6]
-        locb = np.asarray(self.xss[jxs16:jxs16+NMT], dtype=int)
-        for loc, rxn in zip(locb, self.photon_reactions.values()):
-            rxn.LOCB = loc
 
-    def _read_andp(self):
-        """Find the angular distribution for each photon-producing reaction
-        MT."""
-        cdef int ind, i, j, jxs17, NE
+    def _read_photon_angular_distributions(self):
+        # Number of reactions
+        n_reactions = self.nxs[6]
 
-        jxs17 = self.jxs[17]
+        # Angular distribution for all reactions with secondary photons
         for i, rxn in enumerate(self.photon_reactions.values()):
-            if rxn.LOCB == 0:
+            loc = int(self.xss[self.jxs[16] + i])
+
+            if loc == 0:
                 # No angular distribution data are given for this reaction,
                 # isotropic scattering is asssumed in LAB
+                if rxn.mftype == 13:
+                    energies = np.array([self.energy[0], self.energy[-1]])
+                else:
+                    energies = np.array([rxn.photon_yield.x[0],
+                                         rxn.photon_yield.x[-1]])
+
+                rxn.angular_dist = AngularDistribution.isotropic(energies)
                 continue
 
-            ind = jxs17 + rxn.LOCB - 1
+            idx = self.jxs[17] + loc - 1
 
-            # Number of energies and incoming energy grid
-            NE = int(self.xss[ind])
-            self.a_dist_energy_in = self.xss[ind+1:ind+1+NE]
-            ind += 1 + NE
+            rxn.angular_dist = AngularDistribution()
+            rxn.angular_dist.read(self.xss, idx, self.jxs[17])
 
-            # Location of tables associated with each outgoing angle
-            # distribution
-            LC = np.asarray(self.xss[ind:ind+NE], dtype=int)
+    def _read_photon_energy_distributions(self):
+        """Determine the energy distributions for secondary photons"""
 
-            # 32 equiprobable cosine bins for each incoming energy
-            a_dist_mu_out = {}
-            for j, location in enumerate(LC):
-                if location == 0:
-                    continue
-                ind = jxs17 + location - 1
-                a_dist_mu_out[j] = self.xss[ind:ind+33]
-            self.a_dist_mu_out = a_dist_mu_out
+        # Number of reactions with secondary photons
+        n_reactions = self.nxs[6]
+
+        for i, rxn in enumerate(self.photon_reactions.values()):
+            # Determine locator for ith energy distribution
+            location_start = int(self.xss[self.jxs[18] +i])
+
+            # Read energy distribution data
+            rxn.energy_dist = self._get_energy_distribution(
+                self.jxs[19], location_start)
 
     def _read_yp(self):
         """Read list of reactions required as photon production yield
         multipliers.
         """
         if self.nxs[6] != 0:
-            ind = self.jxs[20]
-            NYP = int(self.xss[ind])
+            idx = self.jxs[20]
+            NYP = int(self.xss[idx])
             if NYP > 0:
-                dat = np.asarray(self.xss[ind+1:ind+1+NYP], dtype=int)
+                dat = np.asarray(self.xss[idx+1:idx+1+NYP], dtype=int)
                 self.MT_for_photon_yield = dat
 
     def _read_fis(self):
@@ -1218,38 +757,38 @@ class NeutronTable(AceTable):
         this table is not provided since it is redundant.
         """
         # Check if fission block is present
-        ind = self.jxs[21]
-        if ind == 0:
+        idx = self.jxs[21]
+        if idx == 0:
             return
 
         # Read fission cross sections
-        self.IE_fission = int(self.xss[ind])  # Energy grid index
-        NE = int(self.xss[ind+1])
-        self.sigma_f = self.xss[ind+2:ind+2+NE]
+        self.IE_fission = int(self.xss[idx])  # Energy grid index
+        NE = int(self.xss[idx+1])
+        self.sigma_f = self.xss[idx+2:idx+2+NE]
 
     def _read_unr(self):
         """Read the unresolved resonance range probability tables if present.
         """
-        cdef int ind, N, M, INT, ILF, IOA, IFF
+        cdef int idx, N, M, INT, ILF, IOA, IFF
 
         # Check if URR probability tables are present
-        ind = self.jxs[23]
-        if ind == 0:
+        idx = self.jxs[23]
+        if idx == 0:
             return
 
-        N = int(self.xss[ind])     # Number of incident energies
-        M = int(self.xss[ind+1])   # Length of probability table
-        INT = int(self.xss[ind+2]) # Interpolation parameter (2=lin-lin, 5=log-log)
-        ILF = int(self.xss[ind+3]) # Inelastic competition flag
-        IOA = int(self.xss[ind+4]) # Other absorption flag
-        IFF = int(self.xss[ind+5]) # Factors flag
-        ind += 6
+        N = int(self.xss[idx])     # Number of incident energies
+        M = int(self.xss[idx+1])   # Length of probability table
+        INT = int(self.xss[idx+2]) # Interpolation parameter (2=lin-lin, 5=log-log)
+        ILF = int(self.xss[idx+3]) # Inelastic competition flag
+        IOA = int(self.xss[idx+4]) # Other absorption flag
+        IFF = int(self.xss[idx+5]) # Factors flag
+        idx += 6
 
-        self.urr_energy = self.xss[ind:ind+N] # Incident energies
-        ind += N
+        self.urr_energy = self.xss[idx:idx+N] # Incident energies
+        idx += N
 
         # Set up URR probability table
-        urr_table = self.xss[ind:ind+N*6*M]
+        urr_table = self.xss[idx:idx+N*6*M]
         urr_table.shape = (N, 6, M)
         self.urr_table = urr_table
 
@@ -1262,9 +801,487 @@ class NeutronTable(AceTable):
         #    yield r
         return iter(self.reactions.values())
 
+
+class AngularDistribution(object):
+    def __init__(self):
+        pass
+
+    @classmethod
+    def isotropic(cls, energy):
+        pass
+
+    def read(self, array, idx, loc_and):
+        # Number of energies at which angular distributions are tabulated
+        n_energies = int(array[idx])
+        idx += 1
+
+        # Incoming energy grid
+        self.energy = array[idx:idx + n_energies]
+        idx += n_energies
+
+        # Read locations for angular distributions
+        lc = np.asarray(array[idx:idx + n_energies], dtype=int)
+        idx += n_energies
+
+        self.interp = np.zeros(n_energies, dtype=int)
+        self.cosine = []
+        self.pdf = []
+        self.cdf = []
+        for i in range(n_energies):
+            if lc[i] > 0:
+                # Equiprobable 32 bin distribution
+                idx = loc_and + abs(lc[i]) - 1
+                cos = array[idx:idx + 33]
+                pdf = np.zeros(33)
+                pdf[:32] = 1.0/(32.0*(cos[1:] - cos[:-1]))
+                cdf = np.linspace(0.0, 1.0, 33)
+
+                self.interp[i] = 2
+                self.cosine.append(cos)
+                self.pdf.append(pdf)
+                self.cdf.append(cdf)
+            elif lc[i] < 0:
+                # Tabular angular distribution
+                idx = loc_and + abs(lc[i]) - 1
+                self.interp[i] = int(array[idx])
+                n_points = int(array[idx + 1])
+                data = array[idx + 2:idx + 2 + 3*n_points]
+                data.shape = (3, n_points)
+                self.cosine.append(data[0])
+                self.pdf.append(data[1])
+                self.cdf.append(data[2])
+            else:
+                # Isotropic angular distribution
+                self.interp[i] = 1
+                self.cosine.append(np.array([-1., 0., 1.]))
+                self.pdf.append(np.array([0.5, 0.5, 0.5]))
+                self.cdf.append(np.array([0., 0.5, 1.]))
+
+
 class EnergyDistribution(object):
     def __init__(self):
         pass
+
+    def read(self, array, idx):
+        raise NotImplementedError
+
+
+class Law1(EnergyDistribution):
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        n_regions = int(array[idx])
+        idx += 1
+        if n_regions > 0:
+            data = np.asarray(array[idx:idx + 2*n_regions], dtype=int)
+            data.shape = (2, n_regions)
+            self.nbt, self.interp = data
+            idx += 2 * n_regions
+      
+        # Number of outgoing energies in each E_out table
+        NE = int(array[idx])
+        self.energy_in = array[idx + 1:idx + 1 + NE]
+        idx += 1 + NE
+
+        # Read E_out tables
+        NET = int(array[idx])
+        idx += 1
+        self.energy_out = np.zeros(NE, NET)
+        for i in range(NE):
+            self.energy_out[NE,:] = array[idx:idx + NET]
+            idx += NET
+
+
+class Law2(EnergyDistribution):
+    """Discrete photon energy distribution"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        self.lp = int(array[idx])
+        self.eg = array[idx + 1]
+
+
+class Law3(EnergyDistribution):
+    """Level inelastic scattering"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        self.lab_energy_threshold, self.mass_ratio = array[idx:idx + 2]
+
+class Law4(EnergyDistribution):
+    """Continuous tabular distribution (ENDF Law 1)"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx, ldis):
+        # Read number of interpolation regions and incoming energies
+        n_regions = int(array[idx])
+        n_energy_in = int(array[idx + 1 + 2*n_regions])
+
+        # Get interpolation information
+        idx += 1
+        if n_regions > 0:
+            self.nbt = np.asarray(array[idx:idx + n_regions], dtype=int)
+            self.interp = np.asarray(array[idx + n_regions:
+                                               idx + 2*n_regions], dtype=int)
+        else:
+            self.nbt = np.array([n_energy_in])
+            self.interp = np.array([2])
+
+        # Incoming energies at which distributions exist
+        idx += 2 * n_regions + 1
+        self.energy_in = array[idx:idx + n_energy_in]
+
+        # Location of distributions
+        idx += n_energy_in
+        loc_dist = np.asarray(array[idx:idx + n_energy_in], dtype=int)
+
+        # Initialize variables
+        self.intt = np.zeros(n_energy_in, dtype=int)
+        self.num_discrete_lines = np.zeros(n_energy_in, dtype=int)
+        self.energy_out = []
+        self.pdf = []
+        self.cdf = []
+
+        # Read each outgoing energy distribution
+        for i in range(n_energy_in):
+            idx = ldis + loc_dist[i] - 1
+
+            # intt = interpolation scheme (1=hist, 2=lin-lin)
+            INTTp = int(array[idx])
+            if INTTp > 10:
+                self.intt[i] = INTTp % 10
+                self.num_discrete_lines[i] = (INTTp - self.intt[i])//10
+            else:
+                self.intt[i] = INTTp
+                self.num_discrete_lines[i] = 0
+            if self.intt[i] not in (1, 2):
+                warn("Interpolation code on law 4 distribution is not 1 or 2.")
+
+            n_energy_out = int(array[idx + 1])
+            data = array[idx + 2:idx + 2 + 3*n_energy_out]
+            data.shape = (3, n_energy_out)
+            self.energy_out.append(data[0])
+            self.pdf.append(data[1])
+            self.cdf.append(data[2])
+
+
+class Law5(EnergyDistribution):
+    """General evaporation spectrum (From ENDF-6 FILE 5 LF=5)"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        # Read nuclear temperature as Tab1
+        self.t = Tab1.from_ndarray(array, idx)
+
+        # X-function
+        nr = int(array[idx])
+        ne = int(array[idx + 1 + 2*nr])
+        idx += 2 + 2*nr + 2*ne
+        net = int(array[idx])
+        self.x = array[idx + 1:idx + 1 + net]
+
+
+class Law7(EnergyDistribution):
+    """Maxwell fission spectrum (From ENDF-6 File 5 LF=7)"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        # Read nuclear temperature as Tab1
+        self.t = Tab1.from_ndarray(array, idx)
+
+        # Restriction
+        nr = int(array[idx])
+        ne = int(array[idx + 1 + 2*nr])
+        self.u = array[idx + 2 + 2*nr + 2*ne]
+
+
+class Law9(EnergyDistribution):
+    """Evaporation spectrum (From ENDF-6 File 5 LF=9)"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        # Read nuclear temperature as Tab1
+        self.t = Tab1.from_ndarray(array, idx)
+
+        # Restriction
+        nr = int(array[idx])
+        ne = int(array[idx + 1 + 2*nr])
+        self.u = array[idx + 2 + 2*nr + 2*ne]
+
+
+class Law11(EnergyDistribution):
+    """Watt fission spectrum (From ENDF-6 File 5 LF=11)"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        # Energy-dependent a parameter
+        self.a = Tab1.from_ndarray(array, idx)
+
+        # Advance index
+        nr = int(array[idx])
+        ne = int(array[idx + 1 + 2*nr])
+        idx += 2 + 2*nr + 2*ne
+
+        # Energy-dependent b parameter
+        self.b = Tab1.from_ndarray(array, idx)
+
+        # Advance index
+        nr = int(array[idx])
+        ne = int(array[idx + 1 + 2*nr])
+        idx += 2 + 2*nr + 2*ne
+
+        # Rejection energy
+        self.u = array[idx]
+
+
+class Law44(EnergyDistribution):
+    """Kalbach-87 formalism (ENDF-6 File 6 Law 1, LANG=2)"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx, ldis):
+        # Read number of interpolation regions and incoming energies
+        n_regions = int(array[idx])
+        n_energy_in = int(array[idx + 1 + 2*n_regions])
+
+        # Get interpolation information
+        idx += 1
+        if n_regions > 0:
+            self.nbt = np.asarray(array[idx:idx + n_regions], dtype=int)
+            self.interp = np.asarray(array[idx + n_regions:
+                                               idx + 2*n_regions], dtype=int)
+        else:
+            self.nbt = np.array([n_energy_in])
+            self.interp = np.array([2])
+
+        # Incoming energies at which distributions exist
+        idx += 2 * n_regions + 1
+        self.energy_in = array[idx:idx + n_energy_in]
+
+        # Location of distributions
+        idx += n_energy_in
+        loc_dist = np.asarray(array[idx:idx + n_energy_in], dtype=int)
+
+        # Initialize variables
+        self.intt = np.zeros(n_energy_in, dtype=int)
+        self.num_discrete_lines = np.zeros(n_energy_in, dtype=int)
+        self.energy_out = []
+        self.pdf = []
+        self.cdf = []
+        self.km_r = []
+        self.km_a = []
+
+        # Read each outgoing energy distribution
+        for i in range(n_energy_in):
+            idx = ldis + loc_dist[i] - 1
+
+            # intt = interpolation scheme (1=hist, 2=lin-lin)
+            INTTp = int(array[idx])
+            if INTTp > 10:
+                self.intt[i] = INTTp % 10
+                self.num_discrete_lines[i] = (INTTp - self.intt[i])//10
+            else:
+                self.intt[i] = INTTp
+                self.num_discrete_lines[i] = 0
+            if self.intt[i] not in (1, 2):
+                warn("Interpolation code on law 4 distribution is not 1 or 2.")
+
+            n_energy_out = int(array[idx + 1])
+            data = array[idx + 2:idx + 2 + 5*n_energy_out]
+            data.shape = (5, n_energy_out)
+            self.energy_out.append(data[0])
+            self.pdf.append(data[1])
+            self.cdf.append(data[2])
+            self.km_r.append(data[3])
+            self.km_a.append(data[4])
+
+
+class Law61(EnergyDistribution):
+    """Tabular correlated energy-angular distribution"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx, ldis):
+        # Read number of interpolation regions and incoming energies
+        n_regions = int(array[idx])
+        n_energy_in = int(array[idx + 1 + 2*n_regions])
+
+        # Get interpolation information
+        idx += 1
+        if n_regions > 0:
+            self.nbt = np.asarray(array[idx:idx + n_regions], dtype=int)
+            self.interp = np.asarray(array[idx + n_regions:
+                                               idx + 2*n_regions], dtype=int)
+        else:
+            self.nbt = np.array([n_energy_in])
+            self.interp = np.array([2])
+
+        # Incoming energies at which distributions exist
+        idx += 2 * n_regions + 1
+        self.energy_in = array[idx:idx + n_energy_in]
+
+        # Location of distributions
+        idx += n_energy_in
+        loc_dist = np.asarray(array[idx:idx + n_energy_in], dtype=int)
+
+        # Initialize variables
+        self.intt = np.zeros(n_energy_in, dtype=int)
+        self.num_discrete_lines = np.zeros(n_energy_in, dtype=int)
+        self.energy_out = []
+        self.pdf = []
+        self.cdf = []
+        self.cosine_intt = []
+        self.cosine_out = []
+        self.cosine_pdf = []
+        self.cosine_cdf = []
+
+        # Read each outgoing energy distribution
+        for i in range(n_energy_in):
+            idx = ldis + loc_dist[i] - 1
+
+            # intt = interpolation scheme (1=hist, 2=lin-lin)
+            INTTp = int(array[idx])
+            if INTTp > 10:
+                self.intt[i] = INTTp % 10
+                self.num_discrete_lines[i] = (INTTp - self.intt[i])//10
+            else:
+                self.intt[i] = INTTp
+                self.num_discrete_lines[i] = 0
+            if self.intt[i] not in (1, 2):
+                warn("Interpolation code on law 4 distribution is not 1 or 2.")
+
+            # Secondary energy distribution
+            n_energy_out = int(array[idx + 1])
+            data = array[idx + 2:idx + 2 + 4*n_energy_out]
+            data.shape = (4, n_energy_out)
+            self.energy_out.append(data[0])
+            self.pdf.append(data[1])
+            self.cdf.append(data[2])
+
+            lc = np.asarray(data[3], dtype=int)
+
+            # Secondary angular distributions
+            self.cosine_intt.append(np.zeros(n_energy_out, dtype=int))
+            self.cosine_out.append([])
+            self.cosine_pdf.append([])
+            self.cosine_cdf.append([])
+            for j in range(n_energy_out):
+                if lc[j] > 0:
+                    idx = ldis + abs(lc[j]) - 1
+
+                    self.cosine_intt[-1][j] = int(array[idx])
+                    n_cosine = int(array[idx + 1])
+                    data = array[idx + 2:idx + 2 + 3*n_cosine]
+                    data.shape = (3, n_cosine)
+                    self.cosine_out[-1].append(data[0])
+                    self.cosine_pdf[-1].append(data[1])
+                    self.cosine_cdf[-1].append(data[2])
+                else:
+                    # Isotropic distribution
+                    self.cosine_intt[-1][j] = 1
+                    self.cosine_out[-1].append(np.array([-1.0, 1.0]))
+                    self.cosine_pdf[-1].append(np.array([0.5, 0.5]))
+                    self.cosine_cdf[-1].append(np.array([0.0, 1.0]))
+
+
+class Law66(EnergyDistribution):
+    """N-body phase space distribution (ENDF File 6 Law 6)"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        self.n_bodies = int(array[idx])
+        self.total_mass = array[idx + 1]
+
+
+class Law67(EnergyDistribution):
+    def __init__(self):
+        pass
+
+    def read(self, array, idx, ldis):
+        # Read number of interpolation regions and incoming energies
+        n_regions = int(array[idx])
+        n_energy_in = int(array[idx + 1 + 2*n_regions])
+
+        # Get interpolation information
+        idx += 1
+        if n_regions > 0:
+            self.nbt = np.asarray(array[idx:idx + n_regions], dtype=int)
+            self.interp = np.asarray(array[idx + n_regions:
+                                               idx + 2*n_regions], dtype=int)
+        else:
+            self.nbt = np.array([n_energy_in])
+            self.interp = np.array([2])
+
+        # Incoming energies at which distributions exist
+        idx += 2 * n_regions + 1
+        self.energy_in = array[idx:idx + n_energy_in]
+
+        # Location of distributions
+        idx += n_energy_in
+        loc_dist = np.asarray(array[idx:idx + n_energy_in], dtype=int)
+
+        # Initialize variables
+        self.intmu = np.zeros(n_energy_in, dtype=int)
+        self.intep = []
+        self.cosine_out = []
+        self.energy_out = []
+        self.energy_out_pdf = []
+        self.energy_out_cdf = []
+
+        # Read each outgoing energy distribution
+        for i in range(n_energy_in):
+            idx = ldis + loc_dist[i] - 1
+
+            # intmu = interpolation scheme (1=hist, 2=lin-lin)
+            self.intmu[i] = int(array[idx])
+
+            # Number of equiprobable cosines
+            n_cosine = int(array[idx + 1])
+
+            # Secondary cosines
+            idx += 2
+            self.cosine_out.append(array[idx:idx + n_cosine])
+
+            # locations of energy distributions
+            idx += n_cosine
+            lmu = np.asarray(array[idx:idx + n_cosine])
+
+            # Secondary energy distribution
+            self.intep.append(np.zeros(n_cosine, dtype=int))
+            self.energy_out.append([])
+            self.energy_out_pdf.append([])
+            self.energy_out_cdf.append([])
+
+            for j in range(n_cosine):
+                idx = ldis + lmu[j] - 1
+
+                self.intep[-1][j] = int(array[idx])
+                n_energy_out = int(array[idx + 1])
+                data = array[idx + 2:idx + 2 + 3*n_energy_out]
+                data.shape = (3, n_energy_out)
+                self.energy_out[-1].append(data[0])
+                self.energy_out_pdf[-1].append(data[1])
+                self.energy_out_cdf[-1].append(data[2])
+
 
 class SabTable(AceTable):
     """A SabTable object contains thermal scattering data as represented by
@@ -1330,23 +1347,23 @@ class SabTable(AceTable):
     def _read_itie(self):
         """Read energy-dependent inelastic scattering cross sections.
         """
-        ind = self.jxs[1]
-        NE = int(self.xss[ind])
-        self.inelastic_e_in = self.xss[ind+1:ind+1+NE]
-        self.inelastic_sigma = self.xss[ind+1+NE:ind+1+2*NE]
+        idx = self.jxs[1]
+        NE = int(self.xss[idx])
+        self.inelastic_e_in = self.xss[idx+1:idx+1+NE]
+        self.inelastic_sigma = self.xss[idx+1+NE:idx+1+2*NE]
 
     def _read_itce(self):
         """Read energy-dependent elastic scattering cross sections.
         """
         # Determine if ITCE block exists
-        ind = self.jxs[4]
-        if ind == 0:
+        idx = self.jxs[4]
+        if idx == 0:
             return
 
         # Read values
-        NE = int(self.xss[ind])
-        self.elastic_e_in = self.xss[ind+1:ind+1+NE]
-        self.elastic_P = self.xss[ind+1+NE:ind+1+2*NE]
+        NE = int(self.xss[idx])
+        self.elastic_e_in = self.xss[idx+1:idx+1+NE]
+        self.elastic_P = self.xss[idx+1+NE:idx+1+2*NE]
 
         if self.nxs[5] == 4:
             self.elastic_type = 'sigma=P'
@@ -1360,12 +1377,12 @@ class SabTable(AceTable):
         NE_in = len(self.inelastic_e_in)
         NE_out = self.nxs[4]
         NMU = self.nxs[3]
-        ind = self.jxs[3]
+        idx = self.jxs[3]
         
-        self.inelastic_e_out = self.xss[ind:ind+NE_in*NE_out*(NMU+2):NMU+2]
+        self.inelastic_e_out = self.xss[idx:idx+NE_in*NE_out*(NMU+2):NMU+2]
         self.inelastic_e_out.shape = (NE_in, NE_out)
 
-        self.inelastic_mu_out = self.xss[ind:ind+NE_in*NE_out*(NMU+2)]
+        self.inelastic_mu_out = self.xss[idx:idx+NE_in*NE_out*(NMU+2)]
         self.inelastic_mu_out.shape = (NE_in, NE_out, NMU+2)
         self.inelastic_mu_out = self.inelastic_mu_out[:,:,1:]
 
@@ -1375,10 +1392,10 @@ class SabTable(AceTable):
         NMU = self.nxs[6]
         if self.jxs[4] == 0 or NMU == -1:
             return
-        ind = self.jxs[6]
+        idx = self.jxs[6]
 
         NE = len(self.elastic_e_in)
-        self.elastic_mu_out = self.xss[ind:ind+NE*NMU]
+        self.elastic_mu_out = self.xss[idx:idx+NE*NMU]
         self.elastic_mu_out.shape = (NE, NMU)
 
             
@@ -1448,7 +1465,7 @@ class Reaction(object):
         self.MT = MT       # MT value
         self.Q = None      # Q-value
         self.TY = None     # Neutron release
-        self.IE = None     # Energy grid index
+        self.IE = 1        # Energy grid index
         self.sigma = []    # Cross section values
 
     def broaden(self, T_high):
@@ -1459,10 +1476,15 @@ class Reaction(object):
 
         Return energy threshold for this reaction.
         """
-        return self.table.energy[self.IE]
+        return self.table.energy[self.IE - 1]
 
     def __repr__(self):
-        name = label(self.MT)
+        try:
+            name = label(self.MT)
+        except ValueError:
+            # Occurs for photon reactions with MTs like 4001, etc.
+            name = None
+
         if name is not None:
             rep = "<ACE Reaction: MT={0} {1}>".format(self.MT, name)
         else:
@@ -1563,6 +1585,10 @@ table_types = {
     "g": PhotoatomicMGTable,
     "e": ElectronTable,
     "u": PhotonuclearTable}
+
+_distributions = {1: Law1, 2: Law2, 3: Law3, 4: Law4, 5: Law5, 7: Law7,
+                  9: Law9, 11: Law11, 44: Law44, 61: Law61, 66: Law66,
+                  67: Law67}
 
 if __name__ == '__main__':
     # Might be nice to check environment variable DATAPATH to search for xsdir
