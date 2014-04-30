@@ -194,7 +194,7 @@ class Library(object):
             datastr = '0 ' + ' '.join(lines[6:8])
             nxs = fromstring_split(datastr, dtype=int)
 
-            n_lines = (nxs[1] + 3)/4
+            n_lines = (nxs[1] + 3)//4
             n_bytes = len(lines[-1]) * (n_lines - 2) + 1
 
             # Ensure that we have more tables to read in
@@ -1049,6 +1049,16 @@ class Law11(EnergyDistribution):
         self.u = array[idx]
 
 
+class Law33(EnergyDistribution):
+    """Level inelastic scattering"""
+
+    def __init__(self):
+        pass
+
+    def read(self, array, idx):
+        self.lab_energy_threshold, self.mass_ratio = array[idx:idx + 2]
+
+
 class Law44(EnergyDistribution):
     """Kalbach-87 formalism (ENDF-6 File 6 Law 1, LANG=2)"""
 
@@ -1538,7 +1548,86 @@ class PhotoatomicTable(AceTable):
             return "<ACE Continuous-E Photoatomic Table: {0}>".format(self.name)
         else:
             return "<ACE Continuous-E Photoatomic Table>"
-        
+
+    def _read_all(self):
+        self._read_eszg()
+        self._read_jinc()
+        self._read_jcoh()
+        self._read_heating()
+        self._read_compton_data()
+
+    def _read_eszg(self):
+        # Determine number of energies on common energy grid
+        n_energies = self.nxs[3]
+
+        # Read cross sections
+        idx = self.jxs[1]
+        data = np.asarray(self.xss[idx:idx + 5*n_energies])
+        data.shape = (5, n_energies)
+        self.energy = data[0]
+        self.incoherent = data[1]
+        self.coherent = data[2]
+        self.photoelectric = data[3]
+        self.pairproduction = data[4]
+
+    def _read_jinc(self):
+        # Read incoherent scattering function
+        idx = self.jxs[2]
+        self.incoherent_scattering = self.xss[idx:idx + 21]
+
+    def _read_jcoh(self):
+        # Read coherent form factors and integrated coherent form factors
+        idx = self.jxs[3]
+        self.int_coherent_form_factors = self.xss[idx:idx + 55]
+        self.coherent_form_factors = self.xss[idx + 55:idx + 2*55]
+
+    def _read_jflo(self):
+        raise NotImplementedError
+
+    def _read_heating(self):
+        idx = self.jxs[5]
+        self.avg_heating = self.xss[idx:idx + self.nxs[3]]
+
+    def _read_compton_data(self):
+        # Determine number of Compton profiles
+        n_shells = self.nxs[5]
+
+        if n_shells > 0:
+            # Number of electrons per shell
+            idx = self.jxs[6]
+            self.electrons_per_shell = self.xss[idx:idx + n_shells]
+
+            # Binding energy per shell
+            idx = self.jxs[7]
+            self.binding_energy_per_shell = self.xss[idx:idx + n_shells]
+
+            # Probability of interaction per shell
+            idx = self.jcs[8]
+            self.probability_per_shell = self.xss[idx:idx + n_shells]
+
+            # Initialize arrays for Compton profile data
+            self.compton_profile_interp = np.zeros(n_shells)
+            self.compton_profile_momentum = []
+            self.compton_profile_pdf = []
+            self.compton_profile_cdf = []
+
+            for i in range(n_shells):
+                # Get locator for SWD block
+                loca = int(self.xss[self.jxs[9] + i])
+                idx = self.jxs[10] + loca - 1
+
+                # Get interpolation parameter and number of momentum entries
+                self.compton_profile_interp[i] = int(self.xss[idx])
+                n_momentum = int(self.xss[idx + 1])
+                idx += 2
+
+                # Get momentum entries, PDF, and CDF
+                data = self.xss[idx:idx + 3*n_momentum]
+                data.shape = (3, n_momentum)
+                self.compton_profile_momentum.append(data[0])
+                self.compton_profile_pdf.append(data[1])
+                self.compton_profile_cdf.append(data[2])
+
 
 class PhotoatomicMGTable(AceTable):
 
@@ -1568,12 +1657,201 @@ class PhotonuclearTable(AceTable):
 
     def __init__(self, name, awr, temp):
         super(PhotonuclearTable, self).__init__(name, awr, temp)
+        self.reactions = OrderedDict()
 
     def __repr__(self):
         if hasattr(self, 'name'):
             return "<ACE Photonuclear Table: {0}>".format(self.name)
         else:
             return "<ACE Photonuclear Table>"
+
+    def _read_all(self):
+        self._read_basic()
+        self._read_cross_sections()
+        self._read_secondaries()
+        self._read_angular_distributions()
+        self._read_energy_distributions()
+
+    def _read_basic(self):
+        n_energies = self.nxs[3]
+
+        # Read energy mesh
+        idx = self.jxs[1]
+        self.energy = self.xss[idx:idx + n_energies]
+
+        # Read total cross section
+        idx =self.jxs[2]
+        self.total = self.xss[idx:idx + n_energies]
+
+        # Read non-elastic and elastic cross section
+        if self.jxs[4] > 0:
+            idx = self.jxs[3]
+            self.nonelastic = self.xss[idx:idx + n_energies]
+            idx = self.jxs[4]
+            self.elastic = self.xss[idx:idx + n_energies]
+        else:
+            self.nonelastic = self.total.copy()
+            self.elastic = np.zeros(n_energies)
+
+        # Read heating numbers
+        idx = self.jxs[5]
+        if idx > 0:
+            self.heating = self.xss[idx:idx + n_energies]
+        else:
+            self.heating = np.zeros(n_energies)
+
+    def _read_cross_sections(self):
+        # Determine number of reactions
+        n_reactions = self.nxs[4]
+
+        # Read list of MT numbers and Q values
+        mts = np.asarray(self.xss[self.jxs[6]:self.jxs[6] +
+                                  n_reactions], dtype=int)
+        qvalues = np.asarray(self.xss[self.jxs[7]:self.jxs[7] +
+                                      n_reactions])
+
+        # Create reactions in dictionary
+        reactions = [(mt, Reaction(mt, self)) for mt in mts]
+        self.reactions.update(reactions)
+
+        for i, reaction in enumerate(self.reactions.values()):
+            # Copy Q values
+            reaction.Q = qvalues[i]
+
+            # Determine starting index on energy grid and number of energies
+            idx = self.jxs[9] + int(self.xss[self.jxs[8]+ i]) - 1
+            reaction.IE = int(self.xss[idx])
+            n_energies = int(self.xss[idx + 1])
+            idx += 2
+
+            # Read reaction cross setion
+            reaction.sigma = self.xss[idx:idx + n_energies]
+
+    def _read_secondaries(self):
+        names = {1: 'neutron', 2: 'photon', 3: 'electron',
+                 9: 'proton', 31: 'deuteron', 32: 'triton',
+                 33: 'helium3', 34: 'alpha'}
+
+        n_particles = self.nxs[5]
+        n_entries = self.nxs[7]
+
+        idx = self.jxs[10]
+        ixs = np.asarray(self.xss[idx:idx + n_particles*n_entries], dtype=int)
+        ixs.shape = (n_particles, n_entries)
+        self.ixs = ixs.transpose()
+
+        self.particles = []
+
+        for j in range(n_particles):
+            # Create dictionary for particle
+            particle = {}
+            self.particles.append(particle)
+
+            # Get secondary particle type/name
+            particle['ipt'] = self.ixs[0,j]
+            particle['name'] = names[particle['ipt']]
+
+            # Number of reactions that produce secondary particle
+            n_producing = self.ixs[1,j]
+
+            # Particle-production cross section
+            ixs = self.ixs[2,j]
+            particle['ie_production'] = int(self.xss[idx])
+            ne = int(self.xss[idx + 1])
+            idx += 2
+            particle['production'] = self.xss[idx:idx + ne]
+
+            # Average heating numbers
+            idx = self.ixs[3,j]
+            particle['ie_heating'] = int(self.xss[idx])
+            ne = int(self.xss[idx + 1])
+            idx += 2
+            particle['heating'] = self.xss[idx:idx + ne]
+
+            # MTs of particle production reactions
+            idx = self.ixs[4,j]
+            particle['mt_producing'] = np.asarray(
+                self.xss[idx:idx + n_producing], dtype=int)
+
+            # Coordinate system of reaction producing secondary particle
+            idx = self.ixs[5,j]
+            particle['center_of_mass'] = [i < 0 for i in
+                                          self.xss[idx:idx + n_producing]]
+
+            # Reaction yields
+            particle['yield'] = {}
+            for k in range(n_producing):
+                # Create dictionary for yield data
+                yieldData = {}
+
+                # Read reaction yield data for a single MT
+                idx = self.ixs[7,j] + int(self.xss[self.ixs[6,j]+ k]) - 1
+
+                yieldData['mftype'] = int(self.xss[idx])
+                idx += 1
+
+                if yieldData['mftype'] in (6, 12, 16):
+                    # Yield data from ENDF File 6 or 12
+                    mtmult = int(self.xss[idx])
+                    assert mtmult == particle['mt_producing'][k]
+
+                    # Read yield as function of energy
+                    yieldData['multiplicity'] = Tab1.from_ndarray(
+                        self.xss, idx + 1)
+
+                elif yieldData['mftype'] == 13:
+                    # Production cross section for corresponding MT
+                    yieldData['ie'] = int(self.xss[idx])
+                    ne = int(self.xss[idx + 1])
+                    idx += 2
+                    yieldData['sigma'] = self.xss[idx:idx + ne]
+
+                # Add reaction yield data to dictionary
+                mt = particle['mt_producing'][k]
+                particle['yield'][mt] = yieldData
+
+    def _read_angular_distributions(self):
+        for j, particle in enumerate(self.particles):
+            # Create dictionary for angular distributions
+            angular_dists = {}
+            particle['angular_dist'] = angular_dists
+
+            for k, mt in enumerate(particle['mt_producing']):
+                landp = int(self.xss[self.ixs[8,j]+ k])
+
+                # check if angular distribution data exists
+                if landp == -1:
+                    # Angular distribution data are specified through the
+                    # DLWP block
+                    continue
+                elif landp == 0:
+                    # No angular distribution data are given for this
+                    # reaction, isotropic scattering is assumed
+                    ie = self.reactions[mt].IE - 1
+                    ne = len(self.reactions[mt].sigma)
+                    angular_dists[mt] = AngularDistribution.isotropic(
+                        np.array([self.energy[ie], self.energy[ie + ne - 1]]))
+                    continue
+
+            idx = self.ixs[9,j] + landp - 1
+
+            angular_dists[mt] = AngularDistribution()
+            angular_dists[mt].read(self.xss, idx, self.ixs[9,j])
+
+    def _read_energy_distributions(self):
+        for j, particle in enumerate(self.particles):
+            # Create dictionary for energy distributions
+            energy_dists = {}
+            particle['energy_dist'] = energy_dists
+
+            for k, mt in enumerate(particle['mt_producing']):
+                # Determine locator for kth energy distribution
+                ldlwp = int(self.xss[self.ixs[10,j] + k])
+
+                # Read energy distribution data
+                energy_dists[mt] = self._get_energy_distribution(
+                    self.ixs[11,j], ldlwp)
+                         
 
 table_types = {
     "c": NeutronTable,
@@ -1587,8 +1865,8 @@ table_types = {
     "u": PhotonuclearTable}
 
 _distributions = {1: Law1, 2: Law2, 3: Law3, 4: Law4, 5: Law5, 7: Law7,
-                  9: Law9, 11: Law11, 44: Law44, 61: Law61, 66: Law66,
-                  67: Law67}
+                  9: Law9, 11: Law11, 33: Law33, 44: Law44, 61: Law61,
+                  66: Law66, 67: Law67}
 
 if __name__ == '__main__':
     # Might be nice to check environment variable DATAPATH to search for xsdir
