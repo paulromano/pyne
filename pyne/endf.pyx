@@ -1344,7 +1344,7 @@ class Evaluation(object):
                 edist.energy_in = np.zeros(n_energies)
                 for j in range(n_energies):
                     params, func = self._get_tab1_record()
-                    self.energy_in[j] = params[1]
+                    edist.energy_in[j] = params[1]
                     edist.func_list.append(func)
             elif lf == 5:
                 # General evaporation spectrum
