@@ -1061,6 +1061,10 @@ class Evaluation(object):
                         # File 3 -- Reaction cross sections
                         self._read_reaction_xs(MT)
 
+                    elif MF == 4:
+                        # File 4 -- Angular distributions
+                        self._read_angular_distribution(MT)
+
                     elif MF == 5:
                         # File 5 -- Energy distributions
                         self._read_energy_distribution(MT)
@@ -1313,6 +1317,89 @@ class Evaluation(object):
 
         # Skip SEND record
         self._fh.readline()
+
+    def _read_angular_distribution(self, MT):
+        # Find energy distribution
+        self._print_info(4, MT)
+        self._seek_mfmt(4, MT)
+
+        # Get Reaction instance
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.MFs.append(4)
+
+        adist = AngularDistribution()
+        rxn.angular_dist = adist
+
+        # Read HEAD record
+        items = self._get_head_record()
+        ltt = items[3]
+
+        # Read CONT record
+        items =self._get_cont_record()
+        li = items[2]
+        adist.center_of_mass = (items[3] == 2)
+
+        if ltt == 0 and li == 1:
+            # Purely isotropic
+            adist.type = 'isotropic'
+
+        elif ltt == 1 and li == 0:
+            # Legendre polynomial coefficients
+            adist.type = 'legendre'
+
+            adist.tab2 = self._get_tab2_record()
+            n_energy = adist.tab2.params[5]
+
+            adist.energy = np.zeros(n_energy)
+            adist.coefficients = {}
+            for i in range(n_energy):
+                items, al = self._get_list_record()
+                temperature = items[0]
+                adist.energy[i] = items[1]
+                adist.coefficients[items[1]] = al
+
+        elif ltt == 2 and li == 0:
+            # Tabulated probability distribution
+            adist.type = 'tabulated'
+
+            adist.tab2 = self._get_tab2_record()
+            n_energy = adist.tab2.params[5]
+
+            adist.energy = np.zeros(n_energy)
+            adist.probability = {}
+            for i in range(n_energy):
+                params, f = self._get_tab1_record()
+                temperature = params[0]
+                adist.energy[i] = params[1]
+                adist.probability[params[1]] = f
+
+        elif ltt == 3 and li == 0:
+            # Legendre for low energies / tabulated for high energies
+            adist.type = 'legendre/tabulated'
+
+            adist.tab2_legendre = self._get_tab2_record()
+            n_energy_legendre = adist.tab2_legendre.params[5]
+
+            adist.energy_legendre = np.zeros(n_energy_legendre)
+            adist.coefficients = {}
+            for i in range(n_energy_legendre):
+                items, al = self._get_list_record()
+                temperature = items[0]
+                adist.energy_legendre[i] = items[1]
+                adist.coefficients[items[1]] = al
+
+            adist.tab2_tabulated = self._get_tab2_record()
+            n_energy_tabulated = adist.tab2_tabulated.params[5]
+
+            adist.energy_tabulated = np.zeros(n_energy_tabulated)
+            adist.probability = {}
+            for i in range(n_energy_tabulated):
+                params, f = self._get_tab1_record()
+                temperature = params[0]
+                adist.energy_tabulated[i] = params[1]
+                adist.probability[params[1]] = f
 
     def _read_energy_distribution(self, MT):
         # Find energy distribution
@@ -2209,9 +2296,15 @@ class ENDFTab2Record(object):
             m = m + toRead
 
 
+class AngularDistribution(object):
+    def __init__(self):
+        pass
+
+
 class EnergyDistribution(object):
     def __init__(self):
         pass
+
 
 class Reaction(object):
     """A single MT record on an ENDF file."""
