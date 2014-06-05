@@ -19,6 +19,7 @@ generates ACE-format cross sections.
 from __future__ import division, unicode_literals
 import struct
 from warnings import warn
+from pyne.utils import VnVWarning
 from collections import OrderedDict
 
 cimport numpy as np
@@ -34,9 +35,77 @@ from pyne.endf import Tab1
 from pyne._utils import fromstring_split, fromstring_token
 cdef bint NP_LE_V15 = int(np.__version__.split('.')[1]) <= 5 and np.__version__.startswith('1')
 
+warn(__name__ + " is not yet V&V compliant.", VnVWarning)
+
+def ascii_to_binary(ascii_file, binary_file):
+    """Convert an ACE file in ASCII format (type 1) to binary format (type 2).
+
+    Parameters
+    ----------
+    ascii_file : str
+        Filename of ASCII ACE file
+    binary_file : str
+        Filename of binary ACE file to be written
+
+    """
+
+    # Open ASCII file
+    ascii = open(ascii_file, 'r')
+
+    # Set default record length
+    record_length = 4096
+
+    # Read data from ASCII file
+    lines = ascii.readlines()
+    ascii.close()
+
+    # Open binary file
+    binary = open(binary_file, 'wb')
+
+    idx = 0
+    while idx < len(lines):
+        # Read/write header block
+        hz = lines[idx][:10].encode('UTF-8')
+        aw0 = float(lines[idx][10:22])
+        tz = float(lines[idx][22:34])
+        hd = lines[idx][35:45].encode('UTF-8')
+        hk = lines[idx + 1][:70].encode('UTF-8')
+        hm = lines[idx + 1][70:80].encode('UTF-8')
+        binary.write(struct.pack(str('=10sdd10s70s10s'), hz, aw0, tz, hd, hk, hm))
+
+        # Read/write IZ/AW pairs
+        data = ' '.join(lines[idx + 2:idx + 6]).split()
+        iz = list(map(int, data[::2]))
+        aw = list(map(float, data[1::2]))
+        izaw = [item for sublist in zip(iz, aw) for item in sublist]
+        binary.write(struct.pack(str('=' + 16*'id'), *izaw))
+
+        # Read/write NXS and JXS arrays. Null bytes are added at the end so
+        # that XSS will start at the second record
+        nxs = list(map(int, ' '.join(lines[idx + 6:idx + 8]).split()))
+        jxs = list(map(int, ' '.join(lines[idx + 8:idx + 12]).split()))
+        binary.write(struct.pack(str('=16i32i{0}x'.format(record_length - 500)),
+                                 *(nxs + jxs)))
+
+        # Read/write XSS array. Null bytes are added to form a complete record
+        # at the end of the file
+        n_lines = (nxs[0] + 3)//4
+        xss = list(map(float, ' '.join(lines[
+            idx + 12:idx + 12 + n_lines]).split()))
+        extra_bytes = record_length - ((len(xss)*8 - 1) % record_length + 1)
+        binary.write(struct.pack(str('={0}d{1}x'.format(nxs[0], extra_bytes)),
+                                 *xss))
+
+        # Advance to next table in file
+        idx += 12 + n_lines
+
+    # Close binary file
+    binary.close()
+
 
 class Library(object):
-    """A Library objects represents an ACE-formatted file which may contain
+    """
+    A Library objects represents an ACE-formatted file which may contain
     multiple tables with data.
 
     Parameters
@@ -44,18 +113,16 @@ class Library(object):
     filename : str
         Path of the ACE library file to load.
 
-    :attributes:
-      **binary** : bool
+    Attributes
+    ----------
+    binary : bool
         Identifies Whether the library is in binary format or not
-
-      **tables** : dict
-        Dictionary whose keys are the names of the ACE tables and whose values
-        are the instances of subclasses of AceTable (e.g. NeutronTable)
-
-      **verbose** : bool
+    tables : dict
+        Dictionary whose keys are the names of the ACE tables and whose 
+        values are the instances of subclasses of AceTable (e.g. NeutronTable)
+    verbose : bool
         Determines whether output is printed to the stdout when reading a
         Library
-
     """
 
     def __init__(self, filename):
@@ -88,7 +155,7 @@ class Library(object):
         Parameters
         ----------
         table_names : None, str, or iterable, optional
-            Tables from the file to read in.  If None, reads in all of the 
+            Tables from the file to read in.  If None, reads in all of the
             tables. If str, reads in only the single table of a matching name.
         """
         if isinstance(table_names, basestring):
@@ -152,7 +219,7 @@ class Library(object):
 
             # Read XSS
             self.f.seek(start_position + recl_length)
-            table.xss = list(struct.unpack(str('={0}d').format(length),
+            table.xss = list(struct.unpack(str('={0}d'.format(length)),
                                            self.f.read(length*8)))
 
             # Insert empty object at beginning of NXS, JXS, and XSS
@@ -346,55 +413,56 @@ class NeutronTable(AceTable):
     temp : float
         Temperature of the target nuclide in eV.
     
-    :Attributes:
-      **awr** : float
+    Attributes
+    ----------
+    awr : float
         Atomic mass ratio of the target nuclide.
 
-      **energy** : list of floats
+    energy : list of floats
         The energy values (MeV) at which reaction cross-sections are tabulated.
 
-      **name** : str
+    name : str
         ZAID identifier of the table, e.g. 92235.70c.
 
-      **nu_p_energy** : list of floats
+    nu_p_energy : list of floats
         Energies in MeV at which the number of prompt neutrons emitted per
         fission is tabulated.
 
-      **nu_p_type** : str
+    nu_p_type : str
         Indicates how number of prompt neutrons emitted per fission is
         stored. Can be either "polynomial" or "tabular".
 
-      **nu_p_value** : list of floats
+    nu_p_value : list of floats
         The number of prompt neutrons emitted per fission, if data is stored in
         "tabular" form, or the polynomial coefficients for the "polynomial"
         form.
 
-      **nu_t_energy** : list of floats
+    nu_t_energy : list of floats
         Energies in MeV at which the total number of neutrons emitted per
         fission is tabulated.
 
-      **nu_t_type** : str
+    nu_t_type : str
         Indicates how total number of neutrons emitted per fission is
         stored. Can be either "polynomial" or "tabular".
 
-      **nu_t_value** : list of floats
+    nu_t_value : list of floats
         The total number of neutrons emitted per fission, if data is stored in
         "tabular" form, or the polynomial coefficients for the "polynomial"
         form.
 
-      **reactions** : list of Reactions
+    reactions : list of Reactions
         A list of Reaction instances containing the cross sections, secondary
         angle and energy distributions, and other associated data for each
         reaction for this nuclide.
 
-      **sigma_a** : list of floats
+    sigma_a : list of floats
         The microscopic absorption cross section for each value on the energy
         grid.
 
-      **sigma_t** : list of floats
+    sigma_t : list of floats
         The microscopic total cross section for each value on the energy grid.
 
-      **temp** : float
+    temp : float
         Temperature of the target nuclide in eV.
 
     """
@@ -1306,34 +1374,35 @@ class SabTable(AceTable):
     temp : float
         Temperature of the target nuclide in eV.
 
-    :Attributes:
-      **awr** : float
+    Attributes
+    ----------
+    awr : float
         Atomic mass ratio of the target nuclide.
 
-      **elastic_e_in** : list of floats
+    elastic_e_in : list of floats
         Incoming energies in MeV for which the elastic cross section is
         tabulated.
 
-      **elastic_P** : list of floats
+    elastic_P : list of floats
         Elastic scattering cross section for data derived in the incoherent
         approximation, or Bragg edge parameters for data derived in the coherent
         approximation.
 
-      **elastic_type** : str
+    elastic_type : str
         Describes the behavior of the elastic cross section, i.e. whether it was
         derived in the incoherent or coherent approximation.
 
-      **inelastic_e_in** : list of floats
+    inelastic_e_in : list of floats
         Incoming energies in MeV for which the inelastic cross section is
         tabulated.
 
-      **inelastic_sigma** : list of floats
+    inelastic_sigma : list of floats
         Inelastic scattering cross section in barns at each energy.
 
-      **name** : str
+    name : str
         ZAID identifier of the table, e.g. 92235.70c.
 
-      **temp** : float
+    temp : float
         Temperature of the target nuclide in eV.
 
     """
@@ -1427,42 +1496,43 @@ class Reaction(object):
         the parent nuclide is needed (for instance, the energy grid at which
         cross sections are tabulated)
 
-    :Attributes:
-      **ang_energy_in** : list of floats
+    Attributes
+    ----------
+    ang_energy_in : list of floats
         Incoming energies in MeV at which angular distributions are tabulated.
 
-      **ang_energy_cos** : list of floats
+    ang_energy_cos : list of floats
         Scattering cosines corresponding to each point of the angular distribution
         functions.
 
-      **ang_energy_pdf** : list of floats
+    ang_energy_pdf : list of floats
         Probability distribution function for angular distribution.
 
-      **ang_energy_cdf** : list of floats
+    ang_energy_cdf : list of floats
         Cumulative distribution function for angular distribution.
 
-      **e_dist_energy** : list of floats
+    e_dist_energy : list of floats
         Incoming energies in MeV at which energy distributions are tabulated.
 
-      **e_dist_law** : int
+    e_dist_law : int
         ACE law used for secondary energy distribution.
 
-      **IE** : int
+    IE : int
         The index on the energy grid corresponding to the threshold of this
         reaction.
 
-      **MT** : int
+    MT : int
         The ENDF MT number for this reaction. On occasion, MCNP uses MT numbers
         that don't correspond exactly to the ENDF specification.
 
-      **Q** : float
+    Q : float
         The Q-value of this reaction in MeV.
 
-      **sigma** : list of floats
+    sigma : list of floats
         Microscopic cross section for this reaction at each point on the energy
         grid above the threshold value.
 
-      **TY** : int
+    TY : int
         An integer whose absolute value is the number of neutrons emitted in
         this reaction. If negative, it indicates that scattering should be
         performed in the center-of-mass system. If positive, scattering should
