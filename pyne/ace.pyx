@@ -148,16 +148,16 @@ class Library(object):
         self.tables = {}
 
     def read(self, table_names=None):
-        """read(table_names=None)
-
-        Read through and parse the ACE-format library.
+        """Read through and parse the ACE-format library.
 
         Parameters
         ----------
         table_names : None, str, or iterable, optional
             Tables from the file to read in.  If None, reads in all of the
             tables. If str, reads in only the single table of a matching name.
+
         """
+
         if isinstance(table_names, basestring):
             table_names = [table_names]
 
@@ -170,6 +170,21 @@ class Library(object):
             self._read_ascii(table_names)
 
     def _read_binary(self, table_names, recl_length=4096, entries=512):
+        """Read a binary (Type 2) ACE table.
+
+        Parameters
+        ----------
+        table_names : None, str, or iterable
+            Tables from the file to read in.  If None, reads in all of the
+            tables. If str, reads in only the single table of a matching name.
+        recl_length : int, optional
+            Fortran record length in binary file. Default value is 4096 bytes.
+        entries : int, optional
+            Number of entries per record. The default is 512 corresponding to a
+            record length of 4096 bytes with double precision data.
+
+        """
+
         while True:
             start_position = self.f.tell()
 
@@ -243,6 +258,16 @@ class Library(object):
             self.f.seek(start_position + recl_length*(n_records + 1))
 
     def _read_ascii(self, table_names):
+        """Read an ASCII (Type 1) ACE table.
+
+        Parameters
+        ----------
+        table_names : None, str, or iterable
+            Tables from the file to read in.  If None, reads in all of the
+            tables. If str, reads in only the single table of a matching name.
+
+        """
+
         cdef list lines, rawdata
 
         f = self.f
@@ -326,9 +351,7 @@ class Library(object):
         f.seek(0)
 
     def find_table(self, name):
-        """find_table(name)
-
-        Returns a cross-section table with a given name.
+        """Returns a cross-section table with a given name.
 
         Parameters
         ----------
@@ -356,6 +379,16 @@ class AceTable(object):
     def _get_energy_distribution(self, location_dist, location_start):
         """Returns an EnergyDistribution object from data read in starting at
         location_start.
+
+        Parameters
+        ----------
+        location_dist : int
+            Index in the XSS array corresponding to the start of a block,
+            e.g. JXS(11) for the the DLW block.
+        location_start : int
+            Index in the XSS array corresponding to the start of an energy
+            distribution array
+
         """
 
         # Set starting index for energy distribution
@@ -399,7 +432,7 @@ class AceTable(object):
 
 class NeutronTable(AceTable):
     """A NeutronTable object contains continuous-energy neutron interaction data
-    read from an ACE-formatted Type I table. These objects are not normally
+    read from an ACE-formatted table. These objects are not normally
     instantiated by the user but rather created when reading data using a
     Library object and stored within the ``tables`` attribute of a Library
     object.
@@ -492,7 +525,9 @@ class NeutronTable(AceTable):
         self._read_unr()
 
     def _read_cross_sections(self):
-        """Reads and parses the ESZ, MTR, LQR, TRY, LSIG, and SIG blocks. These
+        """Read reaction cross sections and other data.
+
+        Reads and parses the ESZ, MTR, LQR, TRY, LSIG, and SIG blocks. These
         blocks contain the energy grid, all reaction cross sections, the total
         cross section, average heating numbers, and a list of reactions with
         their Q-values and multiplicites.
@@ -645,7 +680,7 @@ class NeutronTable(AceTable):
                 self.nu['delayed']['energy_dist'].append(energy_dist)
 
     def _read_angular_distributions(self):
-        """Find the angular distribution for each reaction MT
+        """Read the angular distribution for each reaction MT
         """
         cdef int idx, i, j, n_reactions, n_energies, n_bins
         cdef dict ang_cos, ang_pdf, ang_cdf
@@ -677,8 +712,7 @@ class NeutronTable(AceTable):
             reaction.angular_dist.read(self.xss, idx, self.jxs[9])
 
     def _read_energy_distributions(self):
-        """Determine the energy distribution for secondary neutrons for
-        each reaction MT
+        """Read the energy distribution for reactions with secondary neutrons.
         """
         cdef int i
 
@@ -771,6 +805,8 @@ class NeutronTable(AceTable):
 
 
     def _read_photon_angular_distributions(self):
+        """Read angular distributions for secondary photons."""
+
         # Number of reactions
         n_reactions = self.nxs[6]
 
@@ -796,7 +832,7 @@ class NeutronTable(AceTable):
             rxn.angular_dist.read(self.xss, idx, self.jxs[17])
 
     def _read_photon_energy_distributions(self):
-        """Determine the energy distributions for secondary photons"""
+        """Read energy distributions for secondary photons"""
 
         # Number of reactions with secondary photons
         n_reactions = self.nxs[6]
@@ -864,13 +900,32 @@ class NeutronTable(AceTable):
         return self.reactions.get(mt, None)
 
     def __iter__(self):
-        # Generators not supported in Cython
-        #for r in self.reactions.values():
-        #    yield r
         return iter(self.reactions.values())
 
 
 class AngularDistribution(object):
+    """Represents an angular distribution for a secondary particle emerging from
+    a reaction.
+
+    Attributes
+    ----------
+    energies : ndarray
+        Array of incoming neutron energies at which angular distributions exist.
+    interp : ndarray
+        Array of interpolation codes for each angular distribution
+    cosine : List of ndarrays
+        Scattering cosine values at which the probability density function is
+        tabulated. Each ndarray in the list corresponds to a different incoming
+        neutron energy.
+    pdf : List of ndarrays
+        Probability per unit energy of each cosine value. Each ndarray
+        corresponds to a different incoming neutron energy.
+    pdf : List of ndarrays
+        Cumulative probability function. Each ndarray corresponds to a different
+        incoming neutron energy.
+
+    """
+
     def __init__(self):
         pass
 
@@ -927,6 +982,8 @@ class AngularDistribution(object):
 
 
 class EnergyDistribution(object):
+    """Abstract superclass for all energy distributions."""
+
     def __init__(self):
         pass
 
@@ -935,10 +992,35 @@ class EnergyDistribution(object):
 
 
 class Law1(EnergyDistribution):
+    """Tabular equiprobable energy bins (from ENDF law 1)
+
+    Attributes
+    ----------
+    nbt, interp : ndarray
+        ENDF interpolation parameters
+    energy_in : ndarray
+        Incoming neutron energies at which tabulated data exists
+    energy_out : ndarray
+        Two-dimensional array of equiprobable energies for each incoming neutron
+        energy
+
+    """
+
     def __init__(self):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         n_regions = int(array[idx])
         idx += 1
         if n_regions > 0:
@@ -962,32 +1044,105 @@ class Law1(EnergyDistribution):
 
 
 class Law2(EnergyDistribution):
-    """Discrete photon energy distribution"""
+    """Discrete photon energy distribution
+
+    Attributes
+    ----------
+    lp : int
+        Indicator of whether the photon is a primary or non-primary photon.
+    eg : float
+        Photon energy (if lp==0 or lp==1) or binding energy (if lp==2).
+
+    """
 
     def __init__(self):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         self.lp = int(array[idx])
         self.eg = array[idx + 1]
 
 
 class Law3(EnergyDistribution):
-    """Level inelastic scattering"""
+    """Level inelastic scattering
+
+    Attributes
+    ----------
+    lab_energy_threshold : float
+        Energy threshold in the laboratory system, (A + 1)/A * |Q|
+    mass_ratio : float
+        (A/(A + 1))^2
+
+    """
 
     def __init__(self):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         self.lab_energy_threshold, self.mass_ratio = array[idx:idx + 2]
 
 class Law4(EnergyDistribution):
-    """Continuous tabular distribution (ENDF Law 1)"""
+    """Continuous tabular distribution (ENDF Law 1)
+
+    Attributes
+    ----------
+    nbt, interp : int
+        ENDF interpolation parameters
+    energy_in : ndarray
+        Incoming energies at which energy distributions are tabulated
+    intt : ndarray
+        Interpolation parameters for outgoing energies
+    num_discrete_lines : ndarray
+        Number of discrete lines for each distribution
+    energy_out : list of ndarray
+        Array of outgoing energies for each incoming energy
+    pdf : list of ndarray
+        Probability distribution function for each incoming energy
+    cdf : list of ndarray
+        Cumulative distribution function for each incoming energy
+
+    """
 
     def __init__(self):
         pass
 
     def read(self, array, idx, ldis):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+        ldis : int
+             Index in the array corresponding to the start of an energy
+             distribution
+
+        """
+
         # Read number of interpolation regions and incoming energies
         n_regions = int(array[idx])
         n_energy_in = int(array[idx + 1 + 2*n_regions])
@@ -1041,12 +1196,32 @@ class Law4(EnergyDistribution):
 
 
 class Law5(EnergyDistribution):
-    """General evaporation spectrum (From ENDF-6 FILE 5 LF=5)"""
+    """General evaporation spectrum (From ENDF-6 FILE 5 LF=5)
+
+    Attributes
+    ----------
+    t : pyne.endf.Tab1
+        Nuclear temperature as a function of incident particle energy
+    x : ndarray
+        Tabulated probabilistic function
+
+    """
 
     def __init__(self):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         # Read nuclear temperature as Tab1
         self.t = Tab1.from_ndarray(array, idx)
 
@@ -1059,12 +1234,32 @@ class Law5(EnergyDistribution):
 
 
 class Law7(EnergyDistribution):
-    """Maxwell fission spectrum (From ENDF-6 File 5 LF=7)"""
+    """Maxwell fission spectrum (From ENDF-6 File 5 LF=7)
+
+    Attributes
+    ----------
+    t : pyne.endf.Tab1
+        Nuclear temperature as a function of incident particle energy
+    u : float
+        Restriction energy
+
+    """
 
     def __init__(self):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         # Read nuclear temperature as Tab1
         self.t = Tab1.from_ndarray(array, idx)
 
@@ -1075,12 +1270,32 @@ class Law7(EnergyDistribution):
 
 
 class Law9(EnergyDistribution):
-    """Evaporation spectrum (From ENDF-6 File 5 LF=9)"""
+    """Evaporation spectrum (From ENDF-6 File 5 LF=9)
+
+    Attributes
+    ----------
+    t : pyne.endf.Tab1
+        Nuclear temperature as a function of incident particle energy
+    u : float
+        Restriction energy
+
+    """
 
     def __init__(self):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         # Read nuclear temperature as Tab1
         self.t = Tab1.from_ndarray(array, idx)
 
@@ -1091,12 +1306,36 @@ class Law9(EnergyDistribution):
 
 
 class Law11(EnergyDistribution):
-    """Watt fission spectrum (From ENDF-6 File 5 LF=11)"""
+    """Watt fission spectrum (From ENDF-6 File 5 LF=11)
+
+    Attributes
+    ----------
+    a : pyne.endf.Tab1
+        Watt distribution parameter `a` as a function of incident particle
+        energy
+    b : pyne.endf.Tab1
+        Watt distribution parameter `b` as a function of incident particle
+        energy
+    u : float
+        Restriction energy
+
+    """
 
     def __init__(self):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         # Energy-dependent a parameter
         self.a = Tab1.from_ndarray(array, idx)
 
@@ -1118,12 +1357,32 @@ class Law11(EnergyDistribution):
 
 
 class Law33(EnergyDistribution):
-    """Level inelastic scattering"""
+    """Level inelastic scattering
+
+    Attributes
+    ----------
+    lab_energy_threshold : float
+        Energy threshold in the laboratory system, (A + 1)/A * |Q|
+    mass_ratio : float
+        (A/(A + 1))^2
+
+    """
 
     def __init__(self):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         self.lab_energy_threshold, self.mass_ratio = array[idx:idx + 2]
 
 
@@ -1134,6 +1393,20 @@ class Law44(EnergyDistribution):
         pass
 
     def read(self, array, idx, ldis):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+        ldis : int
+             Index in the array corresponding to the start of an energy
+             distribution
+
+        """
+
         # Read number of interpolation regions and incoming energies
         n_regions = int(array[idx])
         n_energy_in = int(array[idx + 1 + 2*n_regions])
@@ -1197,6 +1470,20 @@ class Law61(EnergyDistribution):
         pass
 
     def read(self, array, idx, ldis):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+        ldis : int
+             Index in the array corresponding to the start of an energy
+             distribution
+
+        """
+
         # Read number of interpolation regions and incoming energies
         n_regions = int(array[idx])
         n_energy_in = int(array[idx + 1 + 2*n_regions])
@@ -1286,6 +1573,17 @@ class Law66(EnergyDistribution):
         pass
 
     def read(self, array, idx):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+
+        """
+
         self.n_bodies = int(array[idx])
         self.total_mass = array[idx + 1]
 
@@ -1295,6 +1593,20 @@ class Law67(EnergyDistribution):
         pass
 
     def read(self, array, idx, ldis):
+        """Read energy distribution data from array
+
+        Parameters
+        ----------
+        array : array_like
+             Array containing data to be parsed (usually XSS)
+        idx : int
+             Index in the array to start reading at
+        ldis : int
+             Index in the array corresponding to the start of an energy
+             distribution
+
+        """
+
         # Read number of interpolation regions and incoming energies
         n_regions = int(array[idx])
         n_energy_in = int(array[idx + 1 + 2*n_regions])
