@@ -23,10 +23,12 @@ import re
 import os
 from collections import OrderedDict
 from warnings import warn
+from math import exp, log
 from pyne.utils import VnVWarning
 
 cimport numpy as np
 import numpy as np
+from numpy.polynomial.polynomial import Polynomial
 from scipy.interpolate import interp1d
 
 from pyne cimport cpp_nucname
@@ -1073,6 +1075,10 @@ class Evaluation(object):
                         # File 5 -- Energy distributions
                         self._read_energy_distribution(MT)
 
+                    elif MF == 6:
+                        # File 6 -- Product energy-angle distributions
+                        self._read_product_energy_angle(MT)
+
                     elif MF == 7:
                         # File 7 -- Thermal scattering data
                         if MT == 2:
@@ -1154,33 +1160,19 @@ class Evaluation(object):
         NWD = items[4]
         NXC = items[5]
 
-        # Text record 1
-        items = self._get_text_record()
-        text = items[0]
-        self.target['zsymam'] = text[0:11]
-        self.info['laboratory'] = text[11:22]
-        self.info['date'] = text[22:32]
-        self.info['author'] = text[32:66]
-
-        # Text record 2
-        items = self._get_text_record()
-        text = items[0]
-        self.info['reference'] = text[1:22]
-        self.info['date_distribution'] = text[22:32]
-        self.info['date_release'] = text[33:43]
-        self.info['date_entry'] = text[55:63]
-
-        # Text records 3-5
-        items0 = self._get_text_record()
-        items1 = self._get_text_record()
-        items2 = self._get_text_record()
-        self.info['identifier'] = [items0[0], items1[0], items2[0]]
-
-        # Now read descriptive records
-        self.info['description'] = []
-        for i in range(NWD - 5):
-            line = self._fh.readline()[:66]
-            self.info['description'].append(line)
+        # Text records
+        text = [self._get_text_record() for i in range(NWD)]
+        if len(text) >= 5:
+            self.target['zsymam'] = text[0][0:11]
+            self.info['laboratory'] = text[0][11:22]
+            self.info['date'] = text[0][22:32]
+            self.info['author'] = text[0][32:66]
+            self.info['reference'] = text[1][1:22]
+            self.info['date_distribution'] = text[1][22:32]
+            self.info['date_release'] = text[1][33:43]
+            self.info['date_entry'] = text[1][55:63]
+            self.info['identifier'] = text[2:5]
+            self.info['description'] = text[5:]
 
         # File numbers, reaction designations, and number of records
         self.reaction_list = []
@@ -1202,12 +1194,11 @@ class Evaluation(object):
 
         # Polynomial representation
         if LNU == 1:
-            self.nu['total']['form'] = 'polynomial'
-            self.nu['total']['coefficients'] = np.asarray(
-                self._get_list_record(onlyList=True))
+            coefficients = np.asarray(self._get_list_record(onlyList=True))
+            self.nu['total']['values'] = Polynomial(coefficients)
+            
         # Tabulated representation
         elif LNU == 2:
-            self.nu['total']['form'] = 'tabulated'
             params, self.nu['total']['values'] = self._get_tab1_record()
 
         # Skip SEND record
@@ -1236,11 +1227,10 @@ class Evaluation(object):
 
         if LNU == 1:
             # Nu represented as polynomial
-            self.nu['delayed']['form'] = 'polynomial'
-            self.nu['delayed']['coefficients'] = np.asarray(
-                self._get_list_record(onlyList=True))
+            coefficients = np.asarray(self._get_list_record(onlyList=True))
+            self.nu['delayed']['values'] = Polynomial(coefficients)
         elif LNU == 2:
-            self.nu['delayed']['form'] = 'tabulated'
+            # Nu represented by tabulation
             params, self.nu['delayed']['values'] = self._get_tab1_record()
         self._fh.readline()
 
@@ -1257,12 +1247,10 @@ class Evaluation(object):
 
         if LNU == 1:
             # Polynomial representation (spontaneous fission)
-            self.nu['prompt']['form'] = 'polynomial'
-            self.nu['prompt']['coefficients'] = np.asarray(
-                self._get_list_record(onlyList=True))
+            coefficients = np.asarray(self._get_list_record(onlyList=True))
+            self.nu['prompt']['values'] = Polynomial(coefficients)
         elif LNU == 2:
             # Tabulated values of nu
-            self.nu['prompt']['form'] = 'tabulated'
             params, self.nu['prompt']['values'] = self._get_tab1_record()
 
         # Skip SEND record
@@ -1357,12 +1345,12 @@ class Evaluation(object):
             n_energy = adist.tab2.params[5]
 
             adist.energy = np.zeros(n_energy)
-            adist.coefficients = {}
+            adist.coefficients = []
             for i in range(n_energy):
                 items, al = self._get_list_record()
                 temperature = items[0]
                 adist.energy[i] = items[1]
-                adist.coefficients[items[1]] = al
+                adist.coefficients.append(al)
 
         elif ltt == 2 and li == 0:
             # Tabulated probability distribution
@@ -1372,12 +1360,12 @@ class Evaluation(object):
             n_energy = adist.tab2.params[5]
 
             adist.energy = np.zeros(n_energy)
-            adist.probability = {}
+            adist.probability = []
             for i in range(n_energy):
                 params, f = self._get_tab1_record()
                 temperature = params[0]
                 adist.energy[i] = params[1]
-                adist.probability[params[1]] = f
+                adist.probability.append(f)
 
         elif ltt == 3 and li == 0:
             # Legendre for low energies / tabulated for high energies
@@ -1387,23 +1375,23 @@ class Evaluation(object):
             n_energy_legendre = adist.tab2_legendre.params[5]
 
             adist.energy_legendre = np.zeros(n_energy_legendre)
-            adist.coefficients = {}
+            adist.coefficients = []
             for i in range(n_energy_legendre):
                 items, al = self._get_list_record()
                 temperature = items[0]
                 adist.energy_legendre[i] = items[1]
-                adist.coefficients[items[1]] = al
+                adist.coefficients.append(al)
 
             adist.tab2_tabulated = self._get_tab2_record()
             n_energy_tabulated = adist.tab2_tabulated.params[5]
 
             adist.energy_tabulated = np.zeros(n_energy_tabulated)
-            adist.probability = {}
+            adist.probability = []
             for i in range(n_energy_tabulated):
                 params, f = self._get_tab1_record()
                 temperature = params[0]
                 adist.energy_tabulated[i] = params[1]
-                adist.probability[params[1]] = f
+                adist.probability.append(f)
 
     def _read_energy_distribution(self, MT):
         # Find energy distribution
@@ -1428,41 +1416,120 @@ class Evaluation(object):
             params, applicability = self._get_tab1_record()
             lf = params[3]
             if lf == 1:
-                edist.tab2 = self._get_tab2_record()
-                n_energies = edist.tab2.params[5]
+                tab2 = self._get_tab2_record()
+                n_energies = tab2.params[5]
 
-                edist.func_list = []
-                edist.energy_in = np.zeros(n_energies)
+                energy = np.zeros(n_energies)
+                pdf = []
                 for j in range(n_energies):
                     params, func = self._get_tab1_record()
-                    edist.energy_in[j] = params[1]
-                    edist.func_list.append(func)
+                    energy[j] = params[1]
+                    pdf.append(func)
+                edist = ArbitraryTabulated(energy, pdf)
             elif lf == 5:
                 # General evaporation spectrum
-                edist.u = params[0]
-                params, edist.theta = self._get_tab1_record()
-                params, edist.g = self._get_tab1_record()
+                u = params[0]
+                params, theta = self._get_tab1_record()
+                params, g = self._get_tab1_record()
+                edist = GeneralEvaporation(theta, g, u)
             elif lf == 7:
                 # Simple Maxwellian fission spectrum
-                edist.u = params[0]
-                params, edist.theta = self._get_tab1_record()
+                u = params[0]
+                params, theta = self._get_tab1_record()
+                edist = Maxwellian(theta, u)
             elif lf == 9:
                 # Evaporation spectrum
-                edist.u = params[0]
-                params, edist.theta = self._get_tab1_record()
+                u = params[0]
+                params, theta = self._get_tab1_record()
+                edist = Evaporation(theta, u)
             elif lf == 11:
                 # Energy-dependent Watt spectrum
-                edist.u = params[0]
-                params, edist.a = self._get_tab1_record()
-                params, edist.b = self._get_tab1_record()
+                u = params[0]
+                params, a = self._get_tab1_record()
+                params, b = self._get_tab1_record()
+                edist = Watt(a, b, u)
             elif lf == 12:
                 # Energy-dependent fission neutron spectrum (Madland-Nix)
-                params, edist.tm = self._get_tab1_record()
-                edist.efl, edist.efh = params[0:2]
+                params, tm = self._get_tab1_record()
+                efl, efh = params[0:2]
+                edist = MadlandNix(efl, efh, tm)
 
-            edist.lf = lf
             edist.applicability = applicability
             rxn.distributions.append(edist)
+
+    def _read_product_energy_angle(self, MT):
+        # Find distribution
+        self._print_info(6, MT)
+        self._seek_mfmt(6, MT)
+
+        # Get Reaction instance
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.MFs.append(6)
+        
+        # Read HEAD record
+        items = self._get_head_record()
+        rxn.reference_frame = {1: 'laboratory', 2: 'center-of-mass',
+                               3: 'light-heavy'}[items[3]]
+        n_products = items[4]
+
+        rxn.products = []
+        for i in range(n_products):
+            product = {}
+            rxn.products.append(product)
+
+            # Read TAB1 record for product yield
+            params, product['yield'] = self._get_tab1_record()
+            product['za'] = params[0]
+            product['mass'] = params[1]
+            product['lip'] = params[2]
+            product['law'] = params[3]
+
+            if product['law'] == 1:
+                # Continuum energy-angle distribution
+                tab2 = self._get_tab2_record()
+                product['lang'] = tab2.params[2]
+                product['lep'] = tab2.params[3]
+                ne = tab2.params[5]
+                for i in range(ne):
+                    items, values = self._get_list_record()
+
+            elif product['law'] == 2:
+                # Discrete two-body scattering
+                tab2 = self._get_tab2_record()
+                ne = tab2.params[5]
+                product['energy'] = np.zeros(ne)
+                product['lang'] = np.zeros(ne, dtype=int)
+                product['Al'] = []
+                for i in range(ne):
+                    items, values = self._get_list_record()
+                    product['energy'][i] = items[1]
+                    product['lang'][i] = items[2]
+                    product['Al'].append(np.asarray(values))
+
+            elif product['law'] == 5:
+                # Charged particle elastic scattering
+                tab2 = self._get_tab2_record()
+                ne = tab2.params[5]
+                for i in range(ne):
+                    items, values = self._get_list_record()
+
+            elif product['law'] == 5:
+                # N-body phase-space distribution
+                items = self._get_cont_record()
+                product['apsx'] = items[0]
+                product['npsx'] = items[5]
+
+            elif product['law'] == 7:
+                # Laboratory energy-angle distribution
+                tab2 = self._get_tab2_record()
+                ne = tab2.params[5]
+                for i in range(ne):
+                    tab2mu = self._get_tab2_record()
+                    nmu = tab2mu.params[5]
+                    for j in range(nmu):
+                        params, f = self._get_tab1_record()
 
     def _read_delayed_photon(self):
         self._print_info(1, 460)
@@ -1470,7 +1537,7 @@ class Evaluation(object):
 
         # Create delayed photon data reaction
         dp = {}
-        self.delayed_photons = dp
+        self.delayed_photon = dp
 
         # Determine whether discrete or continuous representation
         items = self._get_head_record()
@@ -1685,12 +1752,12 @@ class Evaluation(object):
                         resonance.DIT = values[12*res + 3]
                         resonance.DEF_ = values[12*res + 4]
                         resonance.DWF = values[12*res + 5]
-                        resonance.GRG = values[12*res + 6]
+                        resonance.GRF = values[12*res + 6]
                         resonance.GIF = values[12*res + 7]
                         resonance.DEC = values[12*res + 8]
                         resonance.DWC = values[12*res + 9]
-                        resonance.DRC = values[12*res + 10]
-                        resonance.DIC = values[12*res + 11]
+                        resonance.GRC = values[12*res + 10]
+                        resonance.GIC = values[12*res + 11]
                         erange['resonances'].append(resonance)
 
         elif erange['representation'] == 'RML':
@@ -1830,7 +1897,7 @@ class Evaluation(object):
                 LT = params[2]
                 elast['S'][temperature] = sdata
 
-        elif elast.LTHR == 2:
+        elif LTHR == 2:
             elast['type'] = 'incoherent'
             params, wt = self._get_tab1_record()
             elast['bound_cross_section'] = params[0]
@@ -1899,7 +1966,7 @@ class Evaluation(object):
         iyield['AWR'] = items[1]
         LE = items[2] - 1  # Determine energy-dependence
 
-        for i in range(LE):
+        for i in range(LE + 1):
             items, itemList = self._get_list_record()
             E = items[0]  # Incident particle energy
             iyield['energies'].append(E)
@@ -1934,7 +2001,7 @@ class Evaluation(object):
         cyield['AWR'] = items[1]
         LE = items[2] - 1  # Determine energy-dependence
 
-        for i in range(LE):
+        for i in range(LE + 1):
             items, itemList = self._get_list_record()
             E = items[0]  # Incident particle energy
             cyield['energies'].append(E)
@@ -1996,26 +2063,60 @@ class Evaluation(object):
             decay['modes']['energy'] = zip(itemList[2::6], itemList[3::6])
             decay['modes']['branching_ratio'] = zip(itemList[4::6], itemList[5::6])
 
+            discrete_type = {0: None, 1: 'allowed', 2: 'first-forbidden',
+                             3: 'second-forbidden'}
+
             # Read spectra
             decay['spectra'] = {}
             for i in range(NSP):
+                spectrum = {}
+
                 items, itemList = self._get_list_record()
-                STYP = radiation_type[items[1]]  # Decay radiation type
-                LCON = items[2]  # Continuous spectrum flag
+                # Decay radiation type
+                spectrum['type'] = radiation_type[items[1]]
+                # Continuous spectrum flag
+                spectrum['continuous_flag'] = {0: 'discrete', 1: 'continuous',
+                                               2: 'both'}[items[2]]
+                spectrum['continuous_normalization'] = tuple(itemList[0:2])
+                
                 NER = items[5]  # Number of tabulated discrete energies
 
-                if LCON != 1:
+                if not spectrum['continuous_flag'] == 'continuous':
+                    # Information about discrete spectrum
+                    spectrum['discrete'] = []
                     for j in range(NER):
                         items, itemList = self._get_list_record()
+                        di = {}
+                        di['energy'] = tuple(items[0:2])
+                        di['from_mode'] = radiation_type[itemList[0]]
+                        di['type'] = discrete_type[itemList[1]]
+                        di['intensity'] = tuple(itemList[2:4])
+                        if spectrum['type'] == 'ec/beta+':
+                            di['positron_intensity'] = tuple(itemList[4:6])
+                        elif spectrum['type'] == 'gamma':
+                            di['internal_pair'] = tuple(itemList[4:6])
+                            di['total_internal_conversion'] = tuple(itemList[6:8])
+                            di['k_shell_conversion'] = tuple(itemList[8:10])
+                            di['l_shell_conversion'] = tuple(itemList[10:12])
+                        spectrum['discrete'].append(di)
 
-                if LCON != 0:
-                    r = self._get_tab1_record()
-                    LCOV = r.params[3]
+                if not spectrum['continuous_flag'] == 'discrete':
+                    # Read continuous spectrum
+                    ci = {}
+                    params, ci['probability'] = self._get_tab1_record()
+                    ci['type'] = radiation_type[params[0]]
 
+                    # Read covariance (Ek, Fk) table
+                    LCOV = params[3]
                     if LCOV != 0:
                         items, itemList = self._get_list_record()
+                        ci['covariance_lb'] = items[3]
+                        ci['covariance'] = zip(itemList[0::2], itemList[1::2])
 
-                decay['spectra'][STYP] = {'LCON': LCON, 'NER': NER}
+                    spectrum['continuous'] = ci
+
+                # Add spectrum to dictionary
+                decay['spectra'][spectrum['type']] = spectrum
 
         else:
             items, itemList = self._get_list_record()
@@ -2078,13 +2179,8 @@ class Evaluation(object):
         if not line:
             line = self._fh.readline()
         if self._veryverbose:
-            print("Get TEXT record")
-        HL = line[0:66]
-        MAT = int(line[66:70])
-        MF = int(line[70:72])
-        MT = int(line[72:75])
-        NS = int(line[75:80])
-        return [HL, MAT, MF, MT, NS]
+            print('Get TEXT record')
+        return line[0:66]
 
     def _get_cont_record(self, line=None, skipC=False):
         if self._veryverbose:
@@ -2180,16 +2276,16 @@ class Evaluation(object):
 
     def __repr__(self):
         try:
-            name = libraries[self.files[0].NLIB]
-            nuclide = self.files[0].ZA
+            name = self.target['zsymam'].replace(' ', '')
+            library = self.info['library']
         except:
             name = "Undetermined"
-            nuclide = "None"
-        return "<{0} Evaluation: {1}>".format(name, nuclide)
+            library = "None"
+        return "<Evaluation: {0}, {1}>".format(name, library)
 
 
 class Tab1(object):
-    def __init__(self, nbt, interp, x, y):
+    def __init__(self, x, y, nbt, interp):
         """Create an ENDF Tab1 object."""
 
         if len(nbt) == 0 and len(interp) == 0:
@@ -2208,6 +2304,20 @@ class Tab1(object):
 
     @classmethod
     def from_ndarray(cls, array, idx=0):
+        """Create a Tab1 object from array.
+
+        Parameters
+        ----------
+        array : ndarray
+            Array is formed as a 1 dimensional array as follows:
+              [number of regions, final pair for each region,
+               interpolation parameters, number of pairs,
+               x-values, y-values]
+        idx : int
+            Offset to read from in array (default of zero)
+
+        """
+
         # Get number of regions and pairs
         n_regions = int(array[idx])
         n_pairs = int(array[idx + 1 + 2*n_regions])
@@ -2218,7 +2328,7 @@ class Tab1(object):
             nbt = np.asarray(array[idx:idx + n_regions], dtype=int)
             interp = np.asarray(array[idx + n_regions:idx + 2*n_regions], dtype=int)
         else:
-            # Zero regions implies linear-linear interpolation by default
+            # NR=0 regions implies linear-linear interpolation by default
             nbt = np.array([n_pairs])
             interp = np.array([2])
 
@@ -2227,7 +2337,7 @@ class Tab1(object):
         x = array[idx:idx + n_pairs]
         y = array[idx + n_pairs:idx + 2*n_pairs]
 
-        return cls(nbt, interp, x, y)
+        return cls(x, y, nbt, interp)
 
     @classmethod
     def from_file(cls, fh):
@@ -2267,7 +2377,244 @@ class Tab1(object):
                 line = line[22:]
                 m += 1
 
-        return params, cls(nbt, interp, x, y)
+        return params, cls(x, y, nbt, interp)
+
+    def __call__(self, x):
+        # Convert x to array if single value is passed
+        if isinstance(x, float) or isinstance(x, int):
+            return_float = True
+            x_ = np.array([x], dtype=float)
+        else:
+            X_ = x.copy()
+            return_float = False
+
+        # In some cases, the first/last point of x may be less than the first
+        # value of self.x due only to precision, so we check if they're close
+        # and set them equal if so. Otherwise, the interpolated value might be
+        # out of range (and thus zero)
+        if np.isclose(x_[0], self.x[0], 1e-8):
+            x_[0] = self.x[0]
+        if np.isclose(x_[-1], self.x_[-1], 1e-8):
+            x_[-1] = self.x[-1]
+
+        # Set flag for multiple interpolation regions
+        if len(self.nbt) > 1:
+            find_interp = True
+        else:
+            # If there is only a single interpolation region specified as
+            # linear-linear, we can take advantage of numpy's interp function
+            if self.interp[0] == 2:
+                y = np.interp(x_, self.x, self.y, left=0.0, right=0.0)
+                return y[0] if return_float else y
+            else:
+                find_interp = False
+                interp = self.interp[0]
+
+        i = 0
+        j = 0
+        jnew = 0
+        y = np.zeros_like(x_)
+        for k in range(len(x_)):
+            # Check for points that are close but not quite equal, and points
+            # that are truly out of the interpolable range
+            if np.isclose(x_[k], self.x[0], 1e-8):
+                y[k] = self.y[0]
+                continue
+            elif np.isclose(x_[k], self.x[-1], 1e-8):
+                y[k] = self.y[-1]
+                continue
+            elif x_[k] < self.x[0] or x[k] > self.x[-1]:
+                y[k] = 0.0
+                continue
+
+            if k == 0:
+                # For the first point, do a search to find the bounding indices
+                i = np.searchsorted(self.x, x_[0], side='right') - 1
+            else:
+                # For other points, do a linear search
+                while self.x[i + 1] < x_[k]:
+                    i += 1
+            if find_interp:
+                # If multiple interpolation regions are present, determine which
+                # one we're in
+                j = np.searchsorted(self.nbt, i+1)
+                interp = self.interp[j]
+
+            if interp == 1:
+                # histogram
+                y[k] = self.y[i]
+            elif interp == 2:
+                # linear-linear
+                y[k] = self.y[i] + (x_[k] - self.x[i])*(self.y[i+1] - self.y[i]) / \
+                    (self.x[i + 1] - self.x[i])
+            elif interp == 3:
+                # linear-log
+                y[k] = self.y[i] + log(x_[k]/self.x[i])*(self.y[i+1] - self.y[i]) / \
+                    log(self.x[i+1]/self.x[i])
+            elif interp == 4:
+                # log-linear
+                y[k] = self.y[i]*exp((x_[k] - self.x[i])*log(self.y[i+1]/self.y[i])/
+                                     (self.x[i+1] - self.x[i]))
+            elif interp == 5:
+                # log-log
+                y[k] = self.y[i]*exp(log(x[k]/self.x[i])*log(self.y[i+1]/self.y[i])/
+                                     log(self.x[i+1]/self.x[i]))
+
+        return y[0] if return_float else y
+
+
+class EnergyDistribution(object):
+    def __init__(self):
+        pass
+
+
+class ArbitraryTabulated(EnergyDistribution):
+    r"""Arbitrary tabulated function given in ENDF MF=5, LF=1 represented as
+
+    .. math::
+         f(E \rightarrow E') = g(E \rightarrow E')
+
+    Attributes
+    ----------
+    energy : ndarray
+        Array of incident neutron energies
+    pdf : list of Tab1
+        Tabulated outgoing energy distribution probability density functions
+
+    """
+
+    def __init__(self, energy, pdf):
+        self.lf = 1
+        self.energy = energy
+        self.pdf = pdf
+
+
+class GeneralEvaporation(EnergyDistribution):
+    r"""General evaporation spectrum given in ENDF MF=5, LF=5 represented as
+
+    .. math::
+        f(E \rightarrow E') = g(E'/\theta(E))
+
+    Attributes
+    ----------
+    theta : Tab1
+        Tabulated function of incident neutron energy :math:`E`
+    g : Tab1
+        Tabulated function of :math:`x = E'/\theta(E)`
+    u : float
+        Constant introduced to define the proper upper limit for the final
+        particle energy such that :math:`0 \le E' \le E - U`
+
+    """
+
+    def __init__(self, theta, g, u):
+        self.lf = 5
+        self.theta = theta
+        self.g = g
+        self.u = u
+
+
+class Maxwellian(EnergyDistribution):
+    r"""Simple Maxwellian fission spectrum given in ENDF MF=5, LF=7 represented
+    as
+
+    .. math::
+        f(E \rightarrow E') = \frac{\sqrt{E'}}{I} e^{-E'/\theta(E)}
+
+    Attributes
+    ----------
+    theta : Tab1
+        Tabulated function of incident neutron energy
+    u : float
+        Constant introduced to define the proper upper limit for the final
+        particle energy such that :math:`0 \le E' \le E - U`
+
+    """
+
+    def __init__(self, theta, u):
+        self.lf = 7
+        self.theta = theta
+        self.u = u
+
+
+class Evaporation(EnergyDistribution):
+    r"""Evaporation spectrum given in ENDF MF=5, LF=9 represented as
+
+    .. math::
+        f(E \rightarrow E') = \frac{E'}{I} e^{-E'/\theta(E)}
+
+    Attributes
+    ----------
+    theta : Tab1
+        Tabulated function of incident neutron energy
+    u : float
+        Constant introduced to define the proper upper limit for the final
+        particle energy such that :math:`0 \le E' \le E - U`
+
+    """
+
+    def __init__(self, theta, u):
+        self.lf = 9
+        self.theta = theta
+        self.u = u
+
+
+class Watt(EnergyDistribution):
+    r"""Energy-dependent Watt spectrum given in ENDF MF=5, LF=11 represented as
+
+    .. math::
+        f(E \rightarrow E') = \frac{e^{-E'/a}}{I} \sinh \left ( \sqrt{bE'}
+        \right )
+
+    Attributes
+    ----------
+    a, b : Tab1
+        Energy-dependent parameters tabulated as function of incident neutron
+        energy
+    u : float
+        Constant introduced to define the proper upper limit for the final
+        particle energy such that :math:`0 \le E' \le E - U`
+
+    """
+
+    def __init__(self, a, b, u):
+        self.lf = 11
+        self.a = a
+        self.b = b
+        self.u = u
+
+
+class MadlandNix(EnergyDistribution):
+    r"""Energy-dependent fission neutron spectrum (Madland and Nix) given in
+    ENDF MF=5, LF=12 represented as
+
+    .. math::
+        f(E \rightarrow E') = \frac{1}{2} [ g(E', E_F(L)) + g(E', E_F(H))]
+
+    where
+
+    .. math::
+        g(E',E_F) = \frac{1}{3\sqrt{E_F T_M}} \left [ u_2^{3/2} E_1 (u_2) -
+        u_1^{3/2} E_1 (u_1) + \gamma \left ( \frac{3}{2}, u_2 \right ) - \gamma
+        \left ( \frac{3}{2}, u_1 \right ) \right ] \\ u_1 = \left ( \sqrt{E'} -
+        \sqrt{E_F} \right )^2 / T_M \\ u_2 = \left ( \sqrt{E'} + \sqrt{E_F}
+        \right )^2 / T_M.
+
+    Attributes
+    ----------
+    efl, efh : float
+        Constants which represent the average kinetic energy per nucleon of the
+        fission fragment (efl = light, efh = heavy)
+    tm : Tab1
+        Parameter tabulated as a function of incident neutron energy
+
+    """
+
+    def __init__(self, efl, efh, tm):
+        self.lf = 12
+        self.efl = efl
+        self.efh = efh
+        self.tm = tm
 
 
 class ENDFTab2Record(object):
@@ -2301,11 +2648,6 @@ class ENDFTab2Record(object):
 
 
 class AngularDistribution(object):
-    def __init__(self):
-        pass
-
-
-class EnergyDistribution(object):
     def __init__(self):
         pass
 
