@@ -26,6 +26,8 @@ Dependencies
 ------------
 PyNE has the following dependencies:
 
+   #. `Fortran compiler <https://gcc.gnu.org/wiki/GFortran>`_
+   #. `C++ compiler <https://gcc.gnu.org/>`_
    #. `CMake <http://www.cmake.org/>`_ (>= 2.8.5)
    #. `NumPy <http://www.numpy.org/>`_ (>= 1.8.0)
    #. `SciPy <http://www.scipy.org/>`_
@@ -74,6 +76,27 @@ prevents the developers from distributing it with PyNE.  However, the
 ``nuc_data_make`` program (which is installed by ``setup.py``) will
 do its best to find relevant nuclear data elsewhere on your machine
 or from public sources on the internet.  
+
+^^^^^^^^^^^^^^^^^^^
+Supported Platforms
+^^^^^^^^^^^^^^^^^^^
+PyNE is currently built and tested daily on the following platforms
+on Python 2.7
+
+ * Ubuntu 12.04 - x86_64
+ * OSX 10.8 - x86_64
+
+PyNE has pre-built binaries for the lastest release (0.4) on windows
+mac and linux 
+
+ * Mac (Python 2.7 and Python 3.3) - x86_64
+ * Linux (Python 2.7 and Python 3.3) - x86_64
+ * Windows (Python 2.7) - x86
+
+PyNE has known issues on the following platforms
+
+ * Windows (64-bit build currently not feasible)
+ * 32-bit platforms (all variants) have known problems - see #315
 
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 Conda Install Instructions

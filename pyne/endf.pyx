@@ -1196,7 +1196,7 @@ class Evaluation(object):
         if LNU == 1:
             coefficients = np.asarray(self._get_list_record(onlyList=True))
             self.nu['total']['values'] = Polynomial(coefficients)
-            
+
         # Tabulated representation
         elif LNU == 2:
             params, self.nu['total']['values'] = self._get_tab1_record()
@@ -1467,7 +1467,7 @@ class Evaluation(object):
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
         rxn.MFs.append(6)
-        
+
         # Read HEAD record
         items = self._get_head_record()
         rxn.reference_frame = {1: 'laboratory', 2: 'center-of-mass',
@@ -2078,7 +2078,7 @@ class Evaluation(object):
                 spectrum['continuous_flag'] = {0: 'discrete', 1: 'continuous',
                                                2: 'both'}[items[2]]
                 spectrum['continuous_normalization'] = tuple(itemList[0:2])
-                
+
                 NER = items[5]  # Number of tabulated discrete energies
 
                 if not spectrum['continuous_flag'] == 'continuous':
