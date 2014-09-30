@@ -797,7 +797,7 @@ class NeutronTable(AceTable):
                 # Cross section data from ENDF File 13
 
                 # Energy grid index at which data starts
-                rxn.IE = int(self.xss[ind]) - 1
+                rxn.IE = int(self.xss[idx]) - 1
 
                 # Cross sections
                 n_energy = int(self.xss[idx + 1])
@@ -869,9 +869,9 @@ class NeutronTable(AceTable):
             return
 
         # Read fission cross sections
-        self.IE_fission = int(self.xss[ind]) - 1  # Energy grid index
-        NE = int(self.xss[ind+1])
-        self.sigma_f = self.xss[ind+2:ind+2+NE]
+        self.IE_fission = int(self.xss[idx]) - 1  # Energy grid index
+        NE = int(self.xss[idx+1])
+        self.sigma_f = self.xss[idx+2:idx+2+NE]
 
     def _read_unr(self):
         """Read the unresolved resonance range probability tables if present.
