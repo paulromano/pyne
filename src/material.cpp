@@ -550,26 +550,28 @@ std::string pyne::Material::mcnp(std::string frac_type) {
   std::string nucmcnp;
   std::string table_item;
   for(pyne::comp_iter i = fracs.begin(); i != fracs.end(); ++i) {
-    // Clear first
-    ss.str(std::string() );
-    ss.str("");
-    ss << pyne::nucname::mcnp(i->first );
-    nucmcnp = ss.str();
-
-    int mcnp_id;
-    mcnp_id = pyne::nucname::mcnp(i->first );
-    // Spaces are important for tests
-    table_item = metadata["table_ids"][nucmcnp].asString();
-    if ( !table_item.empty() ) {
-      oss << "     " << mcnp_id << "." << table_item << " ";
-    } else {
-      oss << "     " << mcnp_id << " ";
+    if (i->second > 0.0) {
+      // Clear first
+      ss.str(std::string());
+      ss.str("");
+      ss << pyne::nucname::mcnp(i->first);
+      nucmcnp = ss.str();
+      
+      int mcnp_id;
+      mcnp_id = pyne::nucname::mcnp(i->first);
+      // Spaces are important for tests
+      table_item = metadata["table_ids"][nucmcnp].asString();
+      if (!table_item.empty()) {
+	oss << "     " << mcnp_id << "." << table_item << " ";
+      } else {
+	oss << "     " << mcnp_id << " ";
+      }
+      // The int needs a little formatting
+      std::stringstream fs;
+      fs << std::setprecision(4) << std::scientific << frac_sign << i->second \
+	 << std::endl;
+      oss << fs.str();
     }
-    // The int needs a little formatting
-    std::stringstream fs;
-    fs << std::setprecision(4) << std::scientific << frac_sign << i->second \
-       << std::endl;
-    oss << fs.str();
   }
 
   return oss.str();
@@ -660,7 +662,7 @@ std::string pyne::Material::fluka_material_component(int fid, int nucid,
     // for compounds (i.e., unrecognized nucids), this will be 0
     atomic_mass = pyne::atomic_mass(nucid);
   } else {
-    atomic_mass = -1; 
+    atomic_mass = 1.0; 
   }  
 
   return fluka_material_line(znum, atomic_mass, fid, fluka_name);
@@ -685,7 +687,7 @@ std::string pyne::Material::fluka_material_line(int znum, double atomic_mass,
 
   ls << fluka_format_field(atomic_mass);
   // Note this is the current object density, and may or may not be meaningful
-  ls << fluka_format_field(density);
+  ls << fluka_format_field(std::sqrt(density*density));
 
   ls << std::setprecision(0) << std::fixed << std::showpoint <<
         std::setw(10) << std::right << (float)fid;
@@ -735,8 +737,8 @@ std::string pyne::Material::fluka_compound_str(int id, std::string frac_type) {
   std::vector<std::string> material_names;
 
   // The nucid doesn't make sense for a compound
-  int znum = 999;
-  double atomic_mass = 999.;
+  int znum = 1;
+  double atomic_mass = 1.;
   // This better be true
   std::string compound_name;
   if (metadata.isMember("fluka_name")) {
@@ -809,9 +811,9 @@ std::string pyne::Material::fluka_compound_str(int id, std::string frac_type) {
     ss << std::setw(10) << std::right << ""; 
     ss << std::setw(10) << std::right << ""; 
     ss << std::setw(10) << std::left << compound_name;
+    ss << std::endl;
     }
 
-  ss<< std::endl;
   return ss.str();
 }
 

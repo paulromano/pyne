@@ -1085,6 +1085,29 @@ def test_mcnp():
                 '     92238.25c 9.5951e-01\n')
     assert_equal(atom, atom_exp)
 
+def test_mcnp_mat0():
+
+    leu = Material(nucvec={'U235': 0.04, 'U236': 0.0, 'U238': 0.96},
+                   metadata={'mat_number': 2,
+                          'table_ids': {'92235':'15c', '92236':'15c', '92238':'25c'},
+                          'mat_name':'LEU',
+                          'source':'Some URL',
+                          'comments': ('this is a long comment that will definitly '
+                                       'go over the 80 character limit, for science'),
+                          'name':'leu'},
+                   density=19.1)
+
+    mass = leu.mcnp()
+    mass_exp = ('C name: leu\n'
+                'C density = 19.1\n'
+                'C source: Some URL\n'
+                'C comments: this is a long comment that will definitly go over the 80 character\n'
+                'C  limit, for science\n'
+                'm2\n'
+                '     92235.15c -4.0000e-02\n'
+                '     92238.25c -9.6000e-01\n')
+    assert_equal(mass, mass_exp)
+
 
 def test_alara():
 
@@ -1181,13 +1204,13 @@ def test_fluka():
     matlines.append(compound)
     written = ''.join(matlines)
 
-    exp  = 'MATERIAL         92.   235.044       -1.       25.                    235-U'
+    exp  = 'MATERIAL         92.   235.044        1.       25.                    235-U'
     exp += '     \n'
-    exp += 'MATERIAL         92.   238.051       -1.       26.                    238-U'
+    exp += 'MATERIAL         92.   238.051        1.       26.                    238-U'
     exp += '     \n'
     exp += '* Fluka Compound'
     exp += ' \n'
-    exp += 'MATERIAL        999.      999.      19.1       27.                    URANIUM'
+    exp += 'MATERIAL          1.        1.      19.1       27.                    URANIUM'
     exp += '   \n'
     exp += 'COMPOUND        0.04     235-U      0.96     238-U                    URANIUM'
     exp += '   \n'
@@ -1220,13 +1243,13 @@ def test_fluka():
     matlines.append(compound)
     written = ''.join(matlines)
 
-    exp  = 'MATERIAL         92.   235.044       -1.       25.                    235-U'
+    exp  = 'MATERIAL         92.   235.044        1.       25.                    235-U'
     exp += '     \n'
-    exp += 'MATERIAL         92.   238.051       -1.       26.                    238-U'
+    exp += 'MATERIAL         92.   238.051        1.       26.                    238-U'
     exp += '     \n'
     exp += '* Fluka Compound'
     exp += ' \n'
-    exp += 'MATERIAL        999.      999.      19.1       27.                    URANIUM'
+    exp += 'MATERIAL          1.        1.      19.1       27.                    URANIUM'
     exp += '   \n'
     exp += 'COMPOUND       -0.04     235-U     -0.96     238-U                    URANIUM'
     exp += '   \n'
