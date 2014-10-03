@@ -1345,7 +1345,9 @@ class Evaluation(object):
                 items, al = self._get_list_record()
                 temperature = items[0]
                 adist.energy[i] = items[1]
-                coefficients = np.asarray([0.5] + al)
+                coefficients = np.asarray([1.0] + al)
+                for i in range(len(coefficients)):
+                    coefficients[i] *= (2.*i + 1.)/2.
                 adist.probability.append(Legendre(coefficients))
 
         elif ltt == 2 and li == 0:
@@ -1376,7 +1378,9 @@ class Evaluation(object):
                 items, al = self._get_list_record()
                 temperature = items[0]
                 energy_legendre[i] = items[1]
-                coefficients = np.asarray([0.5] + al)
+                coefficients = np.asarray([1.0] + al)
+                for i in range(len(coefficients)):
+                    coefficients[i] *= (2.*i + 1.)/2.
                 adist.probability.append(Legendre(coefficients))
 
             adist.tab2_tabulated = self._get_tab2_record()
