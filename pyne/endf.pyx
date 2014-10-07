@@ -1393,7 +1393,7 @@ class Evaluation(object):
                 energy_tabulated[i] = params[1]
                 adist.probability.append(f)
 
-             adist.energy = np.concatenate((energy_legendre, energy_tabulated))
+            adist.energy = np.concatenate((energy_legendre, energy_tabulated))
 
     def _read_energy_distribution(self, MT):
         # Find energy distribution
@@ -2387,7 +2387,7 @@ class Tab1(object):
             return_float = True
             x_ = np.array([x], dtype=float)
         else:
-            X_ = x.copy()
+            x_ = x.copy()
             return_float = False
 
         # In some cases, the first/last point of x may be less than the first
@@ -2396,7 +2396,7 @@ class Tab1(object):
         # out of range (and thus zero)
         if np.isclose(x_[0], self.x[0], 1e-8):
             x_[0] = self.x[0]
-        if np.isclose(x_[-1], self.x_[-1], 1e-8):
+        if np.isclose(x_[-1], self.x[-1], 1e-8):
             x_[-1] = self.x[-1]
 
         # Set flag for multiple interpolation regions

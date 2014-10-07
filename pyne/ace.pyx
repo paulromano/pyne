@@ -1149,8 +1149,6 @@ class NeutronTable(AceTable):
 
         return edist
 
->>>>>>> develop
-
     def _read_gpd(self):
         """Read total photon production cross section.
         """
