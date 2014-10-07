@@ -29,6 +29,7 @@ from pyne.utils import VnVWarning
 cimport numpy as np
 import numpy as np
 from numpy.polynomial.polynomial import Polynomial
+from numpy.polynomial.legendre import Legendre
 from scipy.interpolate import interp1d
 
 from pyne cimport cpp_nucname
@@ -1185,9 +1186,6 @@ class Evaluation(object):
         self._print_info(1, 452)
         self._seek_mfmt(1, 452)
 
-        # Create total nu reaction
-        self.nu['total'] = {}
-
         # Determine representation of total nu data
         items = self._get_head_record()
         LNU = items[3]
@@ -1195,11 +1193,11 @@ class Evaluation(object):
         # Polynomial representation
         if LNU == 1:
             coefficients = np.asarray(self._get_list_record(onlyList=True))
-            self.nu['total']['values'] = Polynomial(coefficients)
+            self.nu['total'] = Polynomial(coefficients)
 
         # Tabulated representation
         elif LNU == 2:
-            params, self.nu['total']['values'] = self._get_tab1_record()
+            params, self.nu['total'] = self._get_tab1_record()
 
         # Skip SEND record
         self._fh.readline()
@@ -1238,9 +1236,6 @@ class Evaluation(object):
         self._print_info(1, 456)
         self._seek_mfmt(1, 456)
 
-        # Create delayed nu reaction
-        self.nu['prompt'] = {}
-
         # Determine representation of delayed nu data
         items = self._get_head_record()
         LNU = items[3]
@@ -1248,10 +1243,10 @@ class Evaluation(object):
         if LNU == 1:
             # Polynomial representation (spontaneous fission)
             coefficients = np.asarray(self._get_list_record(onlyList=True))
-            self.nu['prompt']['values'] = Polynomial(coefficients)
+            self.nu['prompt'] = Polynomial(coefficients)
         elif LNU == 2:
             # Tabulated values of nu
-            params, self.nu['prompt']['values'] = self._get_tab1_record()
+            params, self.nu['prompt'] = self._get_tab1_record()
 
         # Skip SEND record
         self._fh.readline()
@@ -1345,12 +1340,15 @@ class Evaluation(object):
             n_energy = adist.tab2.params[5]
 
             adist.energy = np.zeros(n_energy)
-            adist.coefficients = []
+            adist.probability = []
             for i in range(n_energy):
                 items, al = self._get_list_record()
                 temperature = items[0]
                 adist.energy[i] = items[1]
-                adist.coefficients.append(al)
+                coefficients = np.asarray([1.0] + al)
+                for i in range(len(coefficients)):
+                    coefficients[i] *= (2.*i + 1.)/2.
+                adist.probability.append(Legendre(coefficients))
 
         elif ltt == 2 and li == 0:
             # Tabulated probability distribution
@@ -1374,24 +1372,28 @@ class Evaluation(object):
             adist.tab2_legendre = self._get_tab2_record()
             n_energy_legendre = adist.tab2_legendre.params[5]
 
-            adist.energy_legendre = np.zeros(n_energy_legendre)
-            adist.coefficients = []
+            energy_legendre = np.zeros(n_energy_legendre)
+            adist.probability = []
             for i in range(n_energy_legendre):
                 items, al = self._get_list_record()
                 temperature = items[0]
-                adist.energy_legendre[i] = items[1]
-                adist.coefficients.append(al)
+                energy_legendre[i] = items[1]
+                coefficients = np.asarray([1.0] + al)
+                for i in range(len(coefficients)):
+                    coefficients[i] *= (2.*i + 1.)/2.
+                adist.probability.append(Legendre(coefficients))
 
             adist.tab2_tabulated = self._get_tab2_record()
             n_energy_tabulated = adist.tab2_tabulated.params[5]
 
-            adist.energy_tabulated = np.zeros(n_energy_tabulated)
-            adist.probability = []
+            energy_tabulated = np.zeros(n_energy_tabulated)
             for i in range(n_energy_tabulated):
                 params, f = self._get_tab1_record()
                 temperature = params[0]
-                adist.energy_tabulated[i] = params[1]
+                energy_tabulated[i] = params[1]
                 adist.probability.append(f)
+
+             adist.energy = np.concatenate((energy_legendre, energy_tabulated))
 
     def _read_energy_distribution(self, MT):
         # Find energy distribution

@@ -25,6 +25,7 @@ from collections import OrderedDict
 
 cimport numpy as np
 import numpy as np
+from numpy.polynomial.polynomial import Polynomial
 from bisect import bisect_right
 
 from pyne cimport nucname
@@ -485,31 +486,10 @@ class NeutronTable(AceTable):
     name : str
         ZAID identifier of the table, e.g. 92235.70c.
 
-    nu_p_energy : list of floats
-        Energies in MeV at which the number of prompt neutrons emitted per
-        fission is tabulated.
-
-    nu_p_type : str
-        Indicates how number of prompt neutrons emitted per fission is
-        stored. Can be either "polynomial" or "tabular".
-
-    nu_p_value : list of floats
-        The number of prompt neutrons emitted per fission, if data is stored in
-        "tabular" form, or the polynomial coefficients for the "polynomial"
-        form.
-
-    nu_t_energy : list of floats
-        Energies in MeV at which the total number of neutrons emitted per
-        fission is tabulated.
-
-    nu_t_type : str
-        Indicates how total number of neutrons emitted per fission is
-        stored. Can be either "polynomial" or "tabular".
-
-    nu_t_value : list of floats
-        The total number of neutrons emitted per fission, if data is stored in
-        "tabular" form, or the polynomial coefficients for the "polynomial"
-        form.
+    nu : dict
+        Dictionary storing the number of total, prompt, and delayed neutrons per
+        fission as a function of incident neutron energy. Delayed neutron
+        precursor yields and decay constants are also stored.
 
     reactions : list of Reactions
         A list of Reaction instances containing the cross sections, secondary
@@ -633,52 +613,45 @@ class NeutronTable(AceTable):
             LNU = int(self.xss[KNU])
 
             whichnu = 'prompt' if self.jxs[24] > 0 else 'total'
-            self.nu[whichnu] = {}
 
             if LNU == 1:
                 # Polynomial function form of nu
-                self.nu[whichnu]['form'] = 'polynomial'
                 NC = int(self.xss[KNU+1])
-                self.nu[whichnu]['coefficients'] = self.xss[KNU+2:KNU+2+NC]
+                coefficients = self.xss[KNU+2:KNU+2+NC]
+                self.nu[whichnu] = Polynomial(coefficients)
             elif LNU == 2:
                 # Tabular data form of nu
-                self.nu[whichnu]['form'] = 'tabular'
-                self.nu[whichnu]['values'] = Tab1.from_ndarray(self.xss, KNU + 1)
+                self.nu[whichnu] = Tab1.from_ndarray(self.xss, KNU + 1)
 
         # Both prompt nu and total nu
         elif self.xss[jxs2] < 0:
             KNU = jxs2 + 1
             LNU = int(self.xss[KNU])
-            self.nu['prompt'] = {}
 
             if LNU == 1:
                 # Polynomial function form of nu
-                self.nu['prompt']['form'] = 'polynomial'
                 NC = int(self.xss[KNU+1])
-                self.nu['prompt']['coefficients'] = self.xss[KNU+2:KNU+2+NC]
+                coefficients = self.xss[KNU+2:KNU+2+NC]
+                self.nu['prompt'] = Polynomial(coefficients)
             elif LNU == 2:
                 # Tabular data form of nu
-                self.nu['prompt']['form'] = 'tabular'
-                self.nu['prompt']['values'] = Tab1.from_ndarray(self.xss, KNU + 1)
+                self.nu['prompt'] = Tab1.from_ndarray(self.xss, KNU + 1)
 
             KNU = jxs2 + int(abs(self.xss[jxs2])) + 1
             LNU = int(self.xss[KNU])
-            self.nu['total'] = {}
 
             if LNU == 1:
                 # Polynomial function form of nu
-                self.nu['total']['form'] = 'polynomial'
                 NC = int(self.xss[KNU+1])
-                self.nu['total']['coefficients'] = self.xss[KNU+2:KNU+2+NC]
+                coefficients = self.xss[KNU+2:KNU+2+NC]
+                self.nu['total'] = Polynomial(coefficients)
             elif LNU == 2:
                 # Tabular data form of nu
-                self.nu['total']['form'] = 'tabular'
-                self.nu['total']['values'] = Tab1.from_ndarray(self.xss, KNU + 1)
+                self.nu['total'] = Tab1.from_ndarray(self.xss, KNU + 1)
 
         # Check for delayed nu data
         if self.jxs[24] > 0:
             self.nu['delayed'] = {}
-            self.nu['delayed']['form'] = 'tabular'
             KNU = self.jxs[24]
             self.nu['delayed']['values'] = Tab1.from_ndarray(self.xss, KNU + 1)
 
