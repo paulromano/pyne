@@ -21,7 +21,7 @@ from libc.string cimport strtok, strcpy, strncpy
 
 import re
 import os
-from collections import OrderedDict
+from collections import OrderedDict, Iterable
 from warnings import warn
 from math import exp, log
 from pyne.utils import VnVWarning
@@ -2382,87 +2382,66 @@ class Tab1(object):
         return params, cls(x, y, nbt, interp)
 
     def __call__(self, x):
-        # Convert x to array if single value is passed
-        if isinstance(x, float) or isinstance(x, int):
-            return_float = True
-            x_ = np.array([x], dtype=float)
+        # Check if input is array or scalar
+        if isinstance(x, Iterable):
+            iterable = True
+            x = np.array(x)
         else:
-            x_ = x.copy()
-            return_float = False
+            iterable = False
+            x = np.array([x], dtype=float)
+
+        # Create output array
+        y = np.zeros_like(x)
+
+        # Get indices for interpolation
+        idx = np.searchsorted(self.x, x, side='right') - 1
+
+        # Find lowest valid index
+        i_low = np.searchsorted(idx, 0)
+
+        for k in range(len(self.nbt)):
+            # Determine which x values are within this interpolation range
+            i_high = np.searchsorted(idx, self.nbt[k] - 1)
+
+            # Get x values and bounding (x,y) pairs
+            xk = x[i_low:i_high]
+            xi = self.x[idx[i_low:i_high]]
+            xi1 = self.x[idx[i_low:i_high] + 1]
+            yi = self.y[idx[i_low:i_high]]
+            yi1 = self.y[idx[i_low:i_high] + 1]
+
+            if self.interp[k] == 1:
+                # Histogram
+                y[i_low:i_high] = yi
+
+            elif self.interp[k] == 2:
+                # Linear-linear
+                y[i_low:i_high] = yi + (xk - xi)/(xi1 - xi)*(yi1 - yi)
+
+            elif self.interp[k] == 3:
+                # Linear-log
+                y[i_low:i_high] = yi + np.log(xk/xi)/np.log(xi1/xi)*(yi1 - yi)
+
+            elif self.interp[k] == 4:
+                # Log-linear
+                y[i_low:i_high] = yi*np.exp((xk - xi)/(xi1 - xi)*np.log(yi1/yi))
+
+            elif self.interp[k] == 5:
+                # Log-log
+                y[i_low:i_high] = yi*np.exp(np.log(xk/xi)/np.log(xi1/xi)*np.log(yi1/yi))
+
+            i_low = i_high
 
         # In some cases, the first/last point of x may be less than the first
         # value of self.x due only to precision, so we check if they're close
         # and set them equal if so. Otherwise, the interpolated value might be
         # out of range (and thus zero)
-        if np.isclose(x_[0], self.x[0], 1e-8):
-            x_[0] = self.x[0]
-        if np.isclose(x_[-1], self.x[-1], 1e-8):
-            x_[-1] = self.x[-1]
+        if np.isclose(x[0], self.x[0], 1e-8):
+            y[0] = self.y[0]
+        if np.isclose(x[-1], self.x[-1], 1e-8):
+            y[-1] = self.y[-1]
 
-        # Set flag for multiple interpolation regions
-        if len(self.nbt) > 1:
-            find_interp = True
-        else:
-            # If there is only a single interpolation region specified as
-            # linear-linear, we can take advantage of numpy's interp function
-            if self.interp[0] == 2:
-                y = np.interp(x_, self.x, self.y, left=0.0, right=0.0)
-                return y[0] if return_float else y
-            else:
-                find_interp = False
-                interp = self.interp[0]
-
-        i = 0
-        j = 0
-        jnew = 0
-        y = np.zeros_like(x_)
-        for k in range(len(x_)):
-            # Check for points that are close but not quite equal, and points
-            # that are truly out of the interpolable range
-            if np.isclose(x_[k], self.x[0], 1e-8):
-                y[k] = self.y[0]
-                continue
-            elif np.isclose(x_[k], self.x[-1], 1e-8):
-                y[k] = self.y[-1]
-                continue
-            elif x_[k] < self.x[0] or x[k] > self.x[-1]:
-                y[k] = 0.0
-                continue
-
-            if k == 0:
-                # For the first point, do a search to find the bounding indices
-                i = np.searchsorted(self.x, x_[0], side='right') - 1
-            else:
-                # For other points, do a linear search
-                while self.x[i + 1] < x_[k]:
-                    i += 1
-            if find_interp:
-                # If multiple interpolation regions are present, determine which
-                # one we're in
-                j = np.searchsorted(self.nbt, i+1)
-                interp = self.interp[j]
-
-            if interp == 1:
-                # histogram
-                y[k] = self.y[i]
-            elif interp == 2:
-                # linear-linear
-                y[k] = self.y[i] + (x_[k] - self.x[i])*(self.y[i+1] - self.y[i]) / \
-                    (self.x[i + 1] - self.x[i])
-            elif interp == 3:
-                # linear-log
-                y[k] = self.y[i] + log(x_[k]/self.x[i])*(self.y[i+1] - self.y[i]) / \
-                    log(self.x[i+1]/self.x[i])
-            elif interp == 4:
-                # log-linear
-                y[k] = self.y[i]*exp((x_[k] - self.x[i])*log(self.y[i+1]/self.y[i])/
-                                     (self.x[i+1] - self.x[i]))
-            elif interp == 5:
-                # log-log
-                y[k] = self.y[i]*exp(log(x[k]/self.x[i])*log(self.y[i+1]/self.y[i])/
-                                     log(self.x[i+1]/self.x[i]))
-
-        return y[0] if return_float else y
+        return y if iterable else y[0]
 
 
 class EnergyDistribution(object):
