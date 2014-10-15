@@ -673,12 +673,12 @@ class NeutronTable(AceTable):
 
             # Energy distribution for delayed fission neutrons
             LED = self.jxs[26]
-            self.nu['delayed']['energy_dist'] = []
+            self.nu['delayed']['energy_distribution'] = []
             for group in range(n_group):
                 location_start = int(self.xss[LED + group])
                 energy_dist = self._get_energy_distribution(
                     self.jxs[27], location_start)
-                self.nu['delayed']['energy_dist'].append(energy_dist)
+                self.nu['delayed']['energy_distribution'].append(energy_dist)
 
     def _read_angular_distributions(self):
         """Read the angular distribution for each reaction MT
@@ -703,14 +703,14 @@ class NeutronTable(AceTable):
                 # No angular distribution data are given for this
                 # reaction, isotropic scattering is asssumed (in CM if
                 # TY < 0 and in LAB if TY > 0)
-                reaction.angular_dist = AngularDistribution.isotropic(
+                reaction.angular_distribution = AngularDistribution.isotropic(
                     np.array([self.energy[0], self.energy[-1]]))
                 continue
 
             idx = self.jxs[9] + loc - 1
 
-            reaction.angular_dist = AngularDistribution()
-            reaction.angular_dist.read(self.xss, idx, self.jxs[9])
+            reaction.angular_distribution = AngularDistribution()
+            reaction.angular_distribution.read(self.xss, idx, self.jxs[9])
 
     def _read_energy_distributions(self):
         """Read the energy distribution for reactions with secondary neutrons.
@@ -727,7 +727,7 @@ class NeutronTable(AceTable):
             location_start = int(self.xss[self.jxs[10] + i])
 
             # Read energy distribution data
-            reaction.energy_dist = self._get_energy_distribution(
+            reaction.energy_distribution = self._get_energy_distribution(
                 self.jxs[11], location_start)
 
     def _get_energy_distribution(self, location_start, delayed_n=False):
@@ -1243,13 +1243,13 @@ class NeutronTable(AceTable):
                     energies = np.array([rxn.photon_yield.x[0],
                                          rxn.photon_yield.x[-1]])
 
-                rxn.angular_dist = AngularDistribution.isotropic(energies)
+                rxn.angular_distribution = AngularDistribution.isotropic(energies)
                 continue
 
             idx = self.jxs[17] + loc - 1
 
-            rxn.angular_dist = AngularDistribution()
-            rxn.angular_dist.read(self.xss, idx, self.jxs[17])
+            rxn.angular_distribution = AngularDistribution()
+            rxn.angular_distribution.read(self.xss, idx, self.jxs[17])
 
     def _read_photon_energy_distributions(self):
         """Read energy distributions for secondary photons"""
@@ -1262,7 +1262,7 @@ class NeutronTable(AceTable):
             location_start = int(self.xss[self.jxs[18] +i])
 
             # Read energy distribution data
-            rxn.energy_dist = self._get_energy_distribution(
+            rxn.energy_distribution = self._get_energy_distribution(
                 self.jxs[19], location_start)
 
     def _read_yp(self):
@@ -2616,7 +2616,7 @@ class PhotonuclearTable(AceTable):
         for j, particle in enumerate(self.particles):
             # Create dictionary for angular distributions
             angular_dists = {}
-            particle['angular_dist'] = angular_dists
+            particle['angular_distribution'] = angular_dists
 
             for k, mt in enumerate(particle['mt_producing']):
                 landp = int(self.xss[self.ixs[8,j]+ k])
@@ -2644,7 +2644,7 @@ class PhotonuclearTable(AceTable):
         for j, particle in enumerate(self.particles):
             # Create dictionary for energy distributions
             energy_dists = {}
-            particle['energy_dist'] = energy_dists
+            particle['energy_distribution'] = energy_dists
 
             for k, mt in enumerate(particle['mt_producing']):
                 # Determine locator for kth energy distribution

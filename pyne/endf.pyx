@@ -1003,7 +1003,6 @@ class Evaluation(object):
             self._fh = filename_or_handle
         else:
             self._fh = open(filename_or_handle, 'r')
-        self.files = []
         self._verbose = verbose
         self._veryverbose = False
 
@@ -1317,7 +1316,7 @@ class Evaluation(object):
         rxn.MFs.append(4)
 
         adist = AngularDistribution()
-        rxn.angular_dist = adist
+        rxn.angular_distribution = adist
 
         # Read HEAD record
         items = self._get_head_record()
@@ -1410,7 +1409,7 @@ class Evaluation(object):
         items = self._get_head_record()
         nk = items[4]
 
-        rxn.distributions = []
+        rxn.energy_distribution = []
         for i in range(nk):
             edist = EnergyDistribution()
 
@@ -1457,7 +1456,7 @@ class Evaluation(object):
                 edist = MadlandNix(efl, efh, tm)
 
             edist.applicability = applicability
-            rxn.distributions.append(edist)
+            rxn.energy_distribution.append(edist)
 
     def _read_product_energy_angle(self, MT):
         # Find distribution
@@ -1476,10 +1475,10 @@ class Evaluation(object):
                                3: 'light-heavy'}[items[3]]
         n_products = items[4]
 
-        rxn.products = []
+        rxn.product_distribution = []
         for i in range(n_products):
             product = {}
-            rxn.products.append(product)
+            rxn.product_distribution.append(product)
 
             # Read TAB1 record for product yield
             params, product['yield'] = self._get_tab1_record()
