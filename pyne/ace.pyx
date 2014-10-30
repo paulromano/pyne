@@ -427,13 +427,13 @@ class AceTable(object):
         law = int(self.xss[idx + 1])
         location_data = int(self.xss[idx + 2])
 
-        # Probability of law valifity
+        # Probability of law validity
         p_law_validity = Tab1.from_ndarray(self.xss, idx + 3)
 
         # Position index for reading law data
         idx = location_dist + location_data - 1
 
-        # Chcek for valid and supported ACE law
+        # Check for valid and supported ACE law
         if law not in _distributions:
             raise IOError("Unsupported ACE secondary energy "
                           "distribution law {0}".format(law))
@@ -448,13 +448,14 @@ class AceTable(object):
             edist.read(self.xss, idx)
 
         # Set law and probability of law validity
-        edist.law = law
         edist.p_law_validity = p_law_validity
 
         # Read next law if present
         if location_next_law > 0:
             edist.next = self._get_energy_distribution(
                 location_dist, location_next_law)
+        else:
+            edist.next = None
 
         return edist
 
@@ -477,34 +478,32 @@ class NeutronTable(AceTable):
 
     Attributes
     ----------
+    absorption_cross_section : ndarray
+        The microscopic absorption cross section for each value on the energy
+        grid.
     awr : float
-        Atomic mass ratio of the target nuclide.
-
-    energy : list of floats
+        Atomic weight ratio of the target nuclide.
+    energy : ndarray
         The energy values (MeV) at which reaction cross-sections are tabulated.
-
+    heating_number : ndarray
+        The total heating number for each value on the energy grid in MeV-b.
     name : str
         ZAID identifier of the table, e.g. 92235.70c.
-
     nu : dict
         Dictionary storing the number of total, prompt, and delayed neutrons per
         fission as a function of incident neutron energy. Delayed neutron
         precursor yields and decay constants are also stored.
-
-    reactions : list of Reactions
-        A list of Reaction instances containing the cross sections, secondary
-        angle and energy distributions, and other associated data for each
-        reaction for this nuclide.
-
-    sigma_a : list of floats
-        The microscopic absorption cross section for each value on the energy
-        grid.
-
-    sigma_t : list of floats
-        The microscopic total cross section for each value on the energy grid.
-
+    photon_reactions : dict
+        Contains the cross sections, secondary angle/energy distributions for
+        photon production
+    reactions : dict
+        Contains the cross sections, secondary angle and energy distributions,
+        and other associated data for each reaction. The keys are the MT values
+        and the values are Reaction objects.
     temp : float
         Temperature of the target nuclide in eV.
+    total_cross_section : ndarray
+        The microscopic total cross section for each value on the energy grid in b.
 
     """
 
@@ -553,14 +552,16 @@ class NeutronTable(AceTable):
         # of the reaction cross sections
         arr = self.xss[self.jxs[1]:self.jxs[1] + 5*n_energies]
         arr.shape = (5, n_energies)
-        self.energy, self.sigma_t, self.sigma_a, sigma_el, self.heating = arr
+        self.energy, self.total_cross_section, self.absorption_cross_srction, \
+            elastic_cross_section, self.heating_number = arr
 
         # Create elastic scattering reaction
         elastic_scatter = Reaction(2, self)
         elastic_scatter.Q = 0.0
         elastic_scatter.IE = 0
         elastic_scatter.multiplicity = 1
-        elastic_scatter.sigma = sigma_el
+        elastic_scatter.cross_section = elastic_cross_section
+        elastic_scatter.center_of_mass = True
         self.reactions[2] = elastic_scatter
 
         # Create all other reactions with MT values
@@ -591,8 +592,8 @@ class NeutronTable(AceTable):
             n_energies = int(self.xss[self.jxs[7] + loc])
 
             # Read reaction cross section
-            reaction.sigma = self.xss[self.jxs[7] + loc + 1:
-                                          self.jxs[7] + loc + 1 + n_energies]
+            reaction.cross_section = self.xss[
+                self.jxs[7] + loc + 1:self.jxs[7] + loc + 1 + n_energies]
 
     def _read_nu(self):
         """Read the NU block -- this contains information on the prompt
@@ -799,7 +800,7 @@ class NeutronTable(AceTable):
 
                 # Cross sections
                 n_energy = int(self.xss[idx + 1])
-                rxn.sigma = self.xss[idx + 2:idx + 2 + n_energy]
+                rxn.cross_section = self.xss[idx + 2:idx + 2 + n_energy]
             else:
                 raise ValueError("MFTYPE must be 12, 13, 16. Got {0}".format(
                         rxn.mftype))
@@ -819,7 +820,7 @@ class NeutronTable(AceTable):
                 # No angular distribution data are given for this reaction,
                 # isotropic scattering is asssumed in LAB
                 if rxn.mftype == 13:
-                    energies = np.array([self.energy[0], self.energy[-1]])
+                    energies = np.array([self.energy[reaction.IE], self.energy[-1]])
                 else:
                     energies = np.array([rxn.photon_yield.x[0],
                                          rxn.photon_yield.x[-1]])
@@ -921,7 +922,7 @@ class AngularDistribution(object):
     pdf : List of ndarrays
         Probability per unit energy of each cosine value. Each ndarray
         corresponds to a different incoming neutron energy.
-    pdf : List of ndarrays
+    cdf : List of ndarrays
         Cumulative probability function. Each ndarray corresponds to a different
         incoming neutron energy.
 
@@ -1008,7 +1009,8 @@ class Law1(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law1, self).__init__()
+        self.law = 1
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1057,7 +1059,8 @@ class Law2(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law2, self).__init__()
+        self.law = 2
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1088,7 +1091,8 @@ class Law3(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law3, self).__init__()
+        self.law = 3
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1127,7 +1131,8 @@ class Law4(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law4, self).__init__()
+        self.law = 4
 
     def read(self, array, idx, ldis):
         """Read energy distribution data from array
@@ -1209,7 +1214,8 @@ class Law5(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law5, self).__init__()
+        self.law = 5
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1247,7 +1253,8 @@ class Law7(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law7, self).__init__()
+        self.law = 7
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1283,7 +1290,8 @@ class Law9(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law9, self).__init__()
+        self.law = 9
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1323,7 +1331,8 @@ class Law11(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law11, self).__init__()
+        self.law = 11
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1370,7 +1379,8 @@ class Law33(EnergyDistribution):
     """
 
     def __init__(self):
-        pass
+        super(Law33, self).__init__()
+        self.law = 33
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1391,7 +1401,8 @@ class Law44(EnergyDistribution):
     """Kalbach-87 formalism (ENDF-6 File 6 Law 1, LANG=2)"""
 
     def __init__(self):
-        pass
+        super(Law44, self).__init__()
+        self.law = 44
 
     def read(self, array, idx, ldis):
         """Read energy distribution data from array
@@ -1468,7 +1479,8 @@ class Law61(EnergyDistribution):
     """Tabular correlated energy-angular distribution"""
 
     def __init__(self):
-        pass
+        super(Law61, self).__init__()
+        self.law = 61
 
     def read(self, array, idx, ldis):
         """Read energy distribution data from array
@@ -1571,7 +1583,8 @@ class Law66(EnergyDistribution):
     """N-body phase space distribution (ENDF File 6 Law 6)"""
 
     def __init__(self):
-        pass
+        super(Law66, self).__init__()
+        self.law = 66
 
     def read(self, array, idx):
         """Read energy distribution data from array
@@ -1591,7 +1604,8 @@ class Law66(EnergyDistribution):
 
 class Law67(EnergyDistribution):
     def __init__(self):
-        pass
+        super(Law67, self).__init__()
+        self.law = 67
 
     def read(self, array, idx, ldis):
         """Read energy distribution data from array
@@ -1811,64 +1825,42 @@ class Reaction(object):
 
     Attributes
     ----------
-    ang_energy_in : list of floats
-        Incoming energies in MeV at which angular distributions are tabulated.
-
-    ang_energy_cos : list of floats
-        Scattering cosines corresponding to each point of the angular distribution
-        functions.
-
-    ang_energy_pdf : list of floats
-        Probability distribution function for angular distribution.
-
-    ang_energy_cdf : list of floats
-        Cumulative distribution function for angular distribution.
-
-    e_dist_energy : list of floats
-        Incoming energies in MeV at which energy distributions are tabulated.
-
-    e_dist_law : int
-        ACE law used for secondary energy distribution.
-
+    angular_distribution : AngularDistribution
+        Secondary angle distribution for outgoing particless.
+    center_of_mass : bool
+        Indicates whether scattering kinematics should be performed in the
+        center-of-mass or laboratory reference frame.
+    cross_section : ndarray
+        Microscopic cross section for this reaction at each point on the energy
+        grid above the threshold value in barns.
+    energy_distribution : EnergyDistribution
+        Secondary energy or correlated energy/angle distribution for outgoing
+        particles.
     IE : int
         The index on the energy grid corresponding to the threshold of this
         reaction.
-
     MT : int
         The ENDF MT number for this reaction. On occasion, MCNP uses MT numbers
         that don't correspond exactly to the ENDF specification.
-
+    multiplicity : int
+        Number of neutrons emitted in this reaction
     Q : float
         The Q-value of this reaction in MeV.
-
-    sigma : list of floats
-        Microscopic cross section for this reaction at each point on the energy
-        grid above the threshold value.
-
-    TY : int
-        An integer whose absolute value is the number of neutrons emitted in
-        this reaction. If negative, it indicates that scattering should be
-        performed in the center-of-mass system. If positive, scattering should
-        be preformed in the laboratory system.
+    table : AceTable
+        The ACE table which contains this reaction.
 
     """
 
     def __init__(self, MT, table=None):
-        self.table = table # Reference to containing table
-        self.MT = MT       # MT value
-        self.Q = None      # Q-value
-        self.TY = None     # Neutron release
-        self.IE = 0        # Energy grid index
-        self.sigma = []    # Cross section values
-
-    def broaden(self, T_high):
-        pass
+        self.table = table
+        self.MT = MT
+        self.Q = None
+        self.IE = 0
+        self.cross_section = None
 
     def threshold(self):
-        """threshold()
-
-        Return energy threshold for this reaction.
-        """
+        """Energy threshold for this reaction."""
+        
         return self.table.energy[self.IE - 1]
 
     def __repr__(self):
@@ -1978,14 +1970,15 @@ class PhotoatomicTable(AceTable):
         if n_shells > 0:
             # Number of electrons per shell
             idx = self.jxs[6]
-            self.electrons_per_shell = self.xss[idx:idx + n_shells]
+            self.electrons_per_shell = np.asarray(
+                self.xss[idx:idx + n_shells], dtype=int)
 
             # Binding energy per shell
             idx = self.jxs[7]
             self.binding_energy_per_shell = self.xss[idx:idx + n_shells]
 
             # Probability of interaction per shell
-            idx = self.jcs[8]
+            idx = self.jxs[8]
             self.probability_per_shell = self.xss[idx:idx + n_shells]
 
             # Initialize arrays for Compton profile data
@@ -2063,25 +2056,25 @@ class PhotonuclearTable(AceTable):
         self.energy = self.xss[idx:idx + n_energies]
 
         # Read total cross section
-        idx =self.jxs[2]
-        self.total = self.xss[idx:idx + n_energies]
+        idx = self.jxs[2]
+        self.total_cross_section = self.xss[idx:idx + n_energies]
 
         # Read non-elastic and elastic cross section
         if self.jxs[4] > 0:
             idx = self.jxs[3]
-            self.nonelastic = self.xss[idx:idx + n_energies]
+            self.non_elastic_cross_section = self.xss[idx:idx + n_energies]
             idx = self.jxs[4]
-            self.elastic = self.xss[idx:idx + n_energies]
+            self.elastic_cross_section = self.xss[idx:idx + n_energies]
         else:
-            self.nonelastic = self.total.copy()
-            self.elastic = np.zeros(n_energies)
+            self.non_elastic_cross_section = self.total_cross_section.copy()
+            self.elastic_cross_section = np.zeros(n_energies)
 
         # Read heating numbers
         idx = self.jxs[5]
         if idx > 0:
-            self.heating = self.xss[idx:idx + n_energies]
+            self.heating_number = self.xss[idx:idx + n_energies]
         else:
-            self.heating = np.zeros(n_energies)
+            self.heating_number = np.zeros(n_energies)
 
     def _read_cross_sections(self):
         # Determine number of reactions
@@ -2108,7 +2101,7 @@ class PhotonuclearTable(AceTable):
             idx += 2
 
             # Read reaction cross setion
-            reaction.sigma = self.xss[idx:idx + n_energies]
+            reaction.cross_section = self.xss[idx:idx + n_energies]
 
     def _read_secondaries(self):
         names = {1: 'neutron', 2: 'photon', 3: 'electron',
@@ -2138,7 +2131,7 @@ class PhotonuclearTable(AceTable):
             n_producing = self.ixs[1,j]
 
             # Particle-production cross section
-            ixs = self.ixs[2,j]
+            idx = self.ixs[2,j]
             particle['ie_production'] = int(self.xss[idx])
             ne = int(self.xss[idx + 1])
             idx += 2
@@ -2149,7 +2142,7 @@ class PhotonuclearTable(AceTable):
             particle['ie_heating'] = int(self.xss[idx])
             ne = int(self.xss[idx + 1])
             idx += 2
-            particle['heating'] = self.xss[idx:idx + ne]
+            particle['heating_number'] = self.xss[idx:idx + ne]
 
             # MTs of particle production reactions
             idx = self.ixs[4,j]
@@ -2187,7 +2180,7 @@ class PhotonuclearTable(AceTable):
                     yieldData['ie'] = int(self.xss[idx])
                     ne = int(self.xss[idx + 1])
                     idx += 2
-                    yieldData['sigma'] = self.xss[idx:idx + ne]
+                    yieldData['cross_section'] = self.xss[idx:idx + ne]
 
                 # Add reaction yield data to dictionary
                 mt = particle['mt_producing'][k]
