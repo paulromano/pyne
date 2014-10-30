@@ -46,15 +46,22 @@ libraries = {0: "ENDF/B", 1: "ENDF/A", 2: "JEFF", 3: "EFF",
              4: "ENDF/B High Energy", 5: "CENDL", 6: "JENDL",
              31: "INDL/V", 32: "INDL/A", 33: "FENDL", 34: "IRDF",
              35: "BROND", 36: "INGDB-90", 37: "FENDL/A", 41: "BROND"}
-radiation_type = {0: 'gamma', 1: 'beta-', 2: 'ec/beta+', 3: 'IT',
-                  4: 'alpha', 5: 'neutron', 6: 'sf', 7: 'proton',
-                  8: 'e-', 9: 'xray', 10: 'unknown'}
 resonance_types = {1: 'SLBW', 2: 'MLBW', 3: 'RM', 4: 'AA', 7: 'RML'}
 FILE1_R = re.compile(r'1451 *\d{1,5}$')
 CONTENTS_R = re.compile(' +\d{1,2} +\d{1,3} +\d{1,10} +')
 SPACE66_R = re.compile(' {66}')
 NUMERICAL_DATA_R = re.compile('[\d\-+. ]{80}\n$')
 SPACE66_R = re.compile(' {66}')
+
+def radiation_type(value):
+    p = {0: 'gamma', 1: 'beta-', 2: 'ec/beta+', 3: 'IT',
+         4: 'alpha', 5: 'neutron', 6: 'sf', 7: 'proton',
+         8: 'e-', 9: 'xray', 10: 'unknown'}
+    if value % 1.0 = 0:
+        return p[int(value)]
+    else:
+        return (p[int(value)], p[int(10*value % 10)])
+
 
 class Library(rx.RxLib):
     """A class for a file which contains multiple ENDF evaluations."""
@@ -991,6 +998,38 @@ class Library(rx.RxLib):
         if opened_here:
             fh.close
         return fromendf_tok(s)
+        
+class EndfTape(file)
+    def __init__(self, *args, **kwargs):
+        file.__init__(self, *args, **kwargs)
+        
+    def at_end_of_tape(self):
+        position = self.tell()
+        line = self.readline()
+        if line == '' or line[66:70] == '  -1':
+            return True
+        else:
+            self.seek(position)
+            return False
+            
+    def seek_material_end(self):
+        while True:
+            line = self.readline()
+            if line[66:70] == '   0':
+                break
+
+    def seek_file_end(self):
+        while True:
+            line = self.readline()
+            if line[70:72] == ' 0':
+                break
+
+    def seek_section_end(self):
+        while True:
+            line = self.readline()
+            if line[72:75] == '  0':
+                break
+
 
 class Evaluation(object):
     """
@@ -1002,7 +1041,7 @@ class Evaluation(object):
         if isinstance(filename_or_handle, file):
             self._fh = filename_or_handle
         else:
-            self._fh = open(filename_or_handle, 'r')
+            self._fh = EndfTape(filename_or_handle, 'r')
         self._verbose = verbose
         self._veryverbose = False
 
@@ -1015,7 +1054,6 @@ class Evaluation(object):
         self.material = int(line[66:70])
 
         # Save starting position for this evaluation
-        self._start_position = position
         self._fh.seek(position)
 
         # Create list for reactions
@@ -1025,93 +1063,133 @@ class Evaluation(object):
         # file and a list of what data exists in the file
         self._read_header()
 
-    def read(self, reactions=None):
-        if not reactions:
-            if self._verbose:
-                print("No reaction given. Read all")
-            reactions = []
-            for r in self.reaction_list[1:]:
-                reactions.append(r[0:2])
+        # Save starting position        
+        self._start_position = position
+
+    def read(self, reactions=None, skip_mf=[], skip_mt=[]):
+        """Reads reactions from the ENDF file of the Evaluation object. If no
+        arguments are provided, this method will read all the reactions in the
+        file. A single reaction can be read if provided.
+        
+        Parameters
+        ----------
+        reactions : tuple or list of tuple, optional
+            A single reaction in the following format: (MF, MT)
+        skip_mf : list of int, optional
+            Files (MF) which should not be read
+        skip_mt : list of int, optional
+            Reactions (MT) which should not be read
+            
+        """
+        
+        # Make sure file is positioned correctly
+        self._fh.seek(self._start_position)
+        
         if isinstance(reactions, tuple):
             reactions = [reactions]
-        # Start looping over the requested reactions entry since it is the
-        # MT=451 block that we already read
-        for rMF, rMT in reactions:
-            found = False
-            for MF, MT, NC, MOD in self.reaction_list:
-                if MF == rMF and MT == rMT:
-                    found = True
-                    # File 1 data
-                    if MF == 1:
-                        # Number of total neutrons per fission
-                        if MT == 452:
-                            self._read_total_nu()
-                        # Number of delayed neutrons per fission
-                        elif MT == 455:
-                            self._read_delayed_nu()
-                        # Number of prompt neutrons per fission
-                        elif MT == 456:
-                            self._read_prompt_nu()
-                        # Components of energy release due to fission
-                        elif MT == 458:
-                            self._read_fission_energy()
-                        elif MT == 460:
-                            self._read_delayed_photon()
+            
+        while True:
+            # Find next section
+            while True:
+            position = self._fh.tell()
+            line = self._fh.readline()
+            MAT = int(line[66:70])
+            MF = int(line[70:72])
+            MT = int(line[72:75])
+            if MT > 0 or MAT == 0:
+                self._fh.seek(position)
+                break
 
-                    elif MF == 2:
-                        # File 2 -- Resonance parameters
-                        if MT == 151:
-                            self._read_resonances()
+            # If end of material reached, exit loop
+            if MAT == 0:
+                break
+            
+            # If there are files/reactions requested to be skipped, check them
+            if MF in skip_mf:
+                self._fh.seek_file_end()
+                continue
+            if MT in skip_mt:
+                self._fh.seek_section_end()
+                continue
+        
+            # If reading is restricted to certain reactions, check here
+            if reactions and (MF, MT) not in reactions:
+                self._fh.seek_section_end()
+                continue
+            
+        
+            # File 1 data
+            if MF == 1:
+                if MT == 452:
+                    # Number of total neutrons per fission
+                    self._read_total_nu()
+                elif MT == 455:
+                    # Number of delayed neutrons per fission
+                    self._read_delayed_nu()
+                elif MT == 456:
+                    # Number of prompt neutrons per fission
+                    self._read_prompt_nu()
+                elif MT == 458:
+                    # Components of energy release due to fission
+                    self._read_fission_energy()
+                elif MT == 460:
+                    self._read_delayed_photon()
 
-                    elif MF == 3:
-                        # File 3 -- Reaction cross sections
-                        self._read_reaction_xs(MT)
+            elif MF == 2:
+                # File 2 -- Resonance parameters
+                if MT == 151:
+                    self._read_resonances()
+                else:
+                    self._seek_section_end()
 
-                    elif MF == 4:
-                        # File 4 -- Angular distributions
-                        self._read_angular_distribution(MT)
+            elif MF == 3:
+                # File 3 -- Reaction cross sections
+                self._read_reaction_xs(MT)
 
-                    elif MF == 5:
-                        # File 5 -- Energy distributions
-                        self._read_energy_distribution(MT)
+            elif MF == 4:
+                # File 4 -- Angular distributions
+                self._read_angular_distribution(MT)
 
-                    elif MF == 6:
-                        # File 6 -- Product energy-angle distributions
-                        self._read_product_energy_angle(MT)
+            elif MF == 5:
+                # File 5 -- Energy distributions
+                self._read_energy_distribution(MT)
 
-                    elif MF == 7:
-                        # File 7 -- Thermal scattering data
-                        if MT == 2:
-                            self._read_thermal_elastic()
-                        if MT == 4:
-                            self._read_thermal_inelastic()
+            elif MF == 6:
+                # File 6 -- Product energy-angle distributions
+                self._read_product_energy_angle(MT)
 
-                    elif MF == 8:
-                        # Read File 8 -- decay and fission yield data
-                        if MT == 454:
-                            self._read_independent_yield()
-                        elif MT == 459:
-                            self._read_cumulative_yield()
-                        elif MT == 457:
-                            self._read_decay()
+            elif MF == 7:
+                # File 7 -- Thermal scattering data
+                if MT == 2:
+                    self._read_thermal_elastic()
+                if MT == 4:
+                    self._read_thermal_inelastic()
 
-                    elif MF == 9:
-                        # Read File 9 -- multiplicities
-                        self._read_multiplicity(MT)
+            elif MF == 8:
+                # Read File 8 -- decay and fission yield data
+                if MT == 454:
+                    self._read_independent_yield()
+                elif MT == 459:
+                    self._read_cumulative_yield()
+                elif MT == 457:
+                    self._read_decay()
+                else:
+                    self._fh.seek_section_end()
 
-                    elif MF == 10:
-                        # Read File 10 -- cross sections for production of
-                        # radioactive nuclides
-                        self._read_production_xs(MT)
+            elif MF == 9:
+                # Read File 9 -- multiplicities
+                self._read_multiplicity(MT)
 
-            if not found:
-                if self._verbose:
-                    print("Reaction not found")
-                raise NotFound('Reaction')
+            elif MF == 10:
+                # Read File 10 -- cross sections for production of
+                # radioactive nuclides
+                self._read_production_xs(MT)
+            
+            else:
+                self._fh.seek_file_end()
 
     def _read_header(self):
         self._print_info(1, 451)
-        self._seek_mfmt(1, 451)
 
         # Information about target/projectile
         self.target = {}
@@ -1183,7 +1261,6 @@ class Evaluation(object):
 
     def _read_total_nu(self):
         self._print_info(1, 452)
-        self._seek_mfmt(1, 452)
 
         # Determine representation of total nu data
         items = self._get_head_record()
@@ -1203,7 +1280,6 @@ class Evaluation(object):
 
     def _read_delayed_nu(self):
         self._print_info(1, 455)
-        self._seek_mfmt(1, 455)
 
         # Create delayed nu reaction
         self.nu['delayed'] = {}
@@ -1233,7 +1309,6 @@ class Evaluation(object):
 
     def _read_prompt_nu(self):
         self._print_info(1, 456)
-        self._seek_mfmt(1, 456)
 
         # Determine representation of delayed nu data
         items = self._get_head_record()
@@ -1252,7 +1327,6 @@ class Evaluation(object):
 
     def _read_fission_energy(self):
         self._print_info(1, 458)
-        self._seek_mfmt(1, 458)
 
         # Create fission energy release reaction
         er = {}
@@ -1284,13 +1358,12 @@ class Evaluation(object):
 
     def _read_reaction_xs(self, MT):
         self._print_info(3, MT)
-        self._seek_mfmt(3, MT)
 
         # Get Reaction instance
         if MT not in self.reactions:
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
-        rxn.MFs.append(3)
+        rxn.files.append(3)
 
         # Read HEAD record with ZA and atomic mass ratio
         items = self._get_head_record()
@@ -1307,13 +1380,12 @@ class Evaluation(object):
     def _read_angular_distribution(self, MT):
         # Find energy distribution
         self._print_info(4, MT)
-        self._seek_mfmt(4, MT)
 
         # Get Reaction instance
         if MT not in self.reactions:
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
-        rxn.MFs.append(4)
+        rxn.files.append(4)
 
         adist = AngularDistribution()
         rxn.angular_distribution = adist
@@ -1397,13 +1469,12 @@ class Evaluation(object):
     def _read_energy_distribution(self, MT):
         # Find energy distribution
         self._print_info(5, MT)
-        self._seek_mfmt(5, MT)
 
         # Get Reaction instance
         if MT not in self.reactions:
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
-        rxn.MFs.append(5)
+        rxn.files.append(5)
 
         # Read HEAD record
         items = self._get_head_record()
@@ -1461,13 +1532,12 @@ class Evaluation(object):
     def _read_product_energy_angle(self, MT):
         # Find distribution
         self._print_info(6, MT)
-        self._seek_mfmt(6, MT)
 
         # Get Reaction instance
         if MT not in self.reactions:
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
-        rxn.MFs.append(6)
+        rxn.files.append(6)
 
         # Read HEAD record
         items = self._get_head_record()
@@ -1516,7 +1586,7 @@ class Evaluation(object):
                 for i in range(ne):
                     items, values = self._get_list_record()
 
-            elif product['law'] == 5:
+            elif product['law'] == 6:
                 # N-body phase-space distribution
                 items = self._get_cont_record()
                 product['apsx'] = items[0]
@@ -1534,7 +1604,6 @@ class Evaluation(object):
 
     def _read_delayed_photon(self):
         self._print_info(1, 460)
-        self._seek_mfmt(1, 460)
 
         # Create delayed photon data reaction
         dp = {}
@@ -1569,7 +1638,6 @@ class Evaluation(object):
 
     def _read_resonances(self):
         self._print_info(2, 151)
-        self._seek_mfmt(2, 151)
 
         # Create MT for resonances
         res = {}
@@ -1874,7 +1942,6 @@ class Evaluation(object):
 
     def _read_thermal_elastic(self):
         self._print_info(7, 2)
-        self._seek_mfmt(7, 2)
 
         # Create dictionary for thermal elastic data
         elast = {}
@@ -1906,7 +1973,6 @@ class Evaluation(object):
 
     def _read_thermal_inelastic(self):
         self._print_info(7, 4)
-        self._seek_mfmt(7, 4)
 
         # Create dictionary for thermal inelstic data
         inel = {}
@@ -1951,7 +2017,6 @@ class Evaluation(object):
 
     def _read_independent_yield(self):
         self._print_info(8, 454)
-        self._seek_mfmt(8, 454)
 
         # Create dictionary for independent yield
         iyield = {}
@@ -1963,8 +2028,6 @@ class Evaluation(object):
         iyield['interp'] = []
 
         items = self._get_head_record()
-        iyield['ZA'] = items[0]
-        iyield['AWR'] = items[1]
         LE = items[2] - 1  # Determine energy-dependence
 
         for i in range(LE + 1):
@@ -1986,7 +2049,6 @@ class Evaluation(object):
 
     def _read_cumulative_yield(self):
         self._print_info(8, 459)
-        self._seek_mfmt(8, 459)
 
         # Create dictionary for cumulative yield
         cyield = {}
@@ -1998,8 +2060,6 @@ class Evaluation(object):
         cyield['interp'] = []
 
         items = self._get_head_record()
-        cyield['ZA'] = items[0]
-        cyield['AWR'] = items[1]
         LE = items[2] - 1  # Determine energy-dependence
 
         for i in range(LE + 1):
@@ -2021,7 +2081,6 @@ class Evaluation(object):
 
     def _read_decay(self):
         self._print_info(8, 457)
-        self._seek_mfmt(8, 457)
 
         decay = {}
         self.decay = decay
@@ -2051,21 +2110,17 @@ class Evaluation(object):
             NDK = items[5]  # Number of decay modes
 
             # Decay type (beta, gamma, etc.)
-            decay['modes'] = {}
-            decay['modes']['type'] = []
-            for i in itemList[0::6]:
-                if i % 1.0 == 0:
-                    decay['modes']['type'].append(radiation_type[int(i)])
-                else:
-                    decay['modes']['type'].append(
-                        (radiation_type[int(i)],
-                         radiation_type[int(10*i % 10)]))
-            decay['modes']['isomeric_state'] = itemList[1::6]
-            decay['modes']['energy'] = zip(itemList[2::6], itemList[3::6])
-            decay['modes']['branching_ratio'] = zip(itemList[4::6], itemList[5::6])
+            decay['modes'] = []
+            for i in range(NDK):
+                mode = {}
+                mode['type'] = radiation_type(itemList[6*i])
+                mode['isomeric_state'] = itemList[6*i + 1]
+                mode['energy'] = tuple(itemList[6*i + 2:6*i + 4])
+                mode['branching_ratio'] = tuple(itemList[6*i + 4:6*(i + 1)])
+                decay['modes'].append(mode)
 
-            discrete_type = {0: None, 1: 'allowed', 2: 'first-forbidden',
-                             3: 'second-forbidden'}
+            discrete_type = {0.0: None, 1.0: 'allowed', 2.0: 'first-forbidden',
+                             3.0: 'second-forbidden'}
 
             # Read spectra
             decay['spectra'] = {}
@@ -2074,11 +2129,13 @@ class Evaluation(object):
 
                 items, itemList = self._get_list_record()
                 # Decay radiation type
-                spectrum['type'] = radiation_type[items[1]]
+                spectrum['type'] = radiation_type(items[1])
                 # Continuous spectrum flag
                 spectrum['continuous_flag'] = {0: 'discrete', 1: 'continuous',
                                                2: 'both'}[items[2]]
-                spectrum['continuous_normalization'] = tuple(itemList[0:2])
+                spectrum['discrete_normalization'] = tuple(itemList[0:2])
+                spectrum['energy_average'] = tuple(itemList[2:4])
+                spectrum['continuous_normalization'] = tuple(itemList[4:6])
 
                 NER = items[5]  # Number of tabulated discrete energies
 
@@ -2089,7 +2146,7 @@ class Evaluation(object):
                         items, itemList = self._get_list_record()
                         di = {}
                         di['energy'] = tuple(items[0:2])
-                        di['from_mode'] = radiation_type[itemList[0]]
+                        di['from_mode'] = radiation_type(itemList[0])
                         di['type'] = discrete_type[itemList[1]]
                         di['intensity'] = tuple(itemList[2:4])
                         if spectrum['type'] == 'ec/beta+':
@@ -2105,7 +2162,7 @@ class Evaluation(object):
                     # Read continuous spectrum
                     ci = {}
                     params, ci['probability'] = self._get_tab1_record()
-                    ci['type'] = radiation_type[params[0]]
+                    ci['type'] = radiation_type(params[0])
 
                     # Read covariance (Ek, Fk) table
                     LCOV = params[3]
@@ -2130,13 +2187,12 @@ class Evaluation(object):
 
     def _read_multiplicity(self, MT):
         self._print_info(9, MT)
-        self._seek_mfmt(9, MT)
 
         # Get Reaction instance
         if MT not in self.reactions:
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
-        rxn.MFs.append(9)
+        rxn.files.append(9)
 
         # Get head record
         items = self._get_head_record()
@@ -2154,13 +2210,12 @@ class Evaluation(object):
 
     def _read_production_xs(self, MT):
         self._print_info(10, MT)
-        self._seek_mfmt(10, MT)
 
         # Get Reaction instance
         if MT not in self.reactions:
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
-        rxn.MFs.append(10)
+        rxn.files.append(10)
 
         # Get head record
         items = self._get_head_record()
@@ -2198,11 +2253,7 @@ class Evaluation(object):
         L2 = int(line[33:44])
         N1 = int(line[44:55])
         N2 = int(line[55:66])
-        MAT = int(line[66:70])
-        MF = int(line[70:72])
-        MT = int(line[72:75])
-        NS = int(line[75:80])
-        return [C1, C2, L1, L2, N1, N2, MAT, MF, MT, NS]
+        return [C1, C2, L1, L2, N1, N2]
 
     def _get_head_record(self, line=None):
         if not line:
@@ -2215,11 +2266,7 @@ class Evaluation(object):
         L2 = int(line[33:44])
         N1 = int(line[44:55])
         N2 = int(line[55:66])
-        MAT = int(line[66:70])
-        MF = int(line[70:72])
-        MT = int(line[72:75])
-        NS = int(line[75:80])
-        return [ZA, AWR, L1, L2, N1, N2, MAT, MF, MT, NS]
+        return [ZA, AWR, L1, L2, N1, N2]
 
     def _get_list_record(self, onlyList=False):
         # determine how many items are in list
@@ -2256,20 +2303,6 @@ class Evaluation(object):
         r.read(self._fh)
         return r
 
-    def _seek_mfmt(self, MF, MT):
-        self._fh.seek(self._start_position)
-        searchString = '{0:4}{1:2}{2:3}'.format(self.material, MF, MT)
-        while True:
-            position = self._fh.tell()
-            line = self._fh.readline()
-            if line == '':
-                # Reached EOF
-                if self._verbose:
-                    print("Could not find MF={0}, MT={1}".format(MF, MT))
-                raise NotFound('Reaction')
-            if line[66:75] == searchString:
-                self._fh.seek(position)
-                break
 
     def _print_info(self, MF, MT):
         if self._verbose:
@@ -2633,11 +2666,37 @@ class AngularDistribution(object):
 
 
 class Reaction(object):
-    """A single MT record on an ENDF file."""
+    """Data for a single reaction including its cross section and secondary
+    angle/energy distribution.
+    
+    Parameters
+    ----------
+    MT : int
+        The MT number from the ENDF file.
+        
+    Attributes
+    ----------
+    angular_distribution : AngularDistribution
+        Angular distribution represented as a tabulated function or as moments
+        of a Legendre polynomial expansion from MF=4.
+    complex_breakup_flag : int
+        Complex breakup flag.
+    cross_section : Tab1
+        Tabulated cross section as a function of incident energy from MF=3.
+    files : list of int
+        List of files (MF) that have been read for this reaction
+    product_distribution : list of dict
+        Secondary energy or correlated energy-angle distribution from MF=6.
+    Q_mass_difference : float
+        Mass difference Q value in eV
+    Q_reaction : float
+        Reaction Q value in eV
+ 
+    """
 
     def __init__(self, MT):
         self.MT = MT
-        self.MFs = []
+        self.files = []
 
     def __repr__(self):
         return "<ENDF Reaction: MT={0}, {1}>".format(self.MT, label(self.MT))
