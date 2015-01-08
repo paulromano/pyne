@@ -1184,6 +1184,18 @@ class Evaluation(object):
                 # Read File 10 -- cross sections for production of
                 # radioactive nuclides
                 self._read_production_xs(MT)
+                
+             elif MF == 23:
+                 # photon interaction data
+                 self._read_photon_interaction(MT)
+                 
+             elif MF == 27:
+                 # atomic form factors or scattering functions
+                 self._read_scattering_functions(MT)
+                 
+             elif MF == 28:
+                 # atomic relaxation data
+                 self._read_atomic_relaxation()
             
             else:
                 self._fh.seek_file_end()
@@ -2230,6 +2242,85 @@ class Evaluation(object):
             LFS = params[3]  # Level number of the nuclide
             rxn.production[LFS] = {'QM': QM, 'QI': QI, 'ZA': IZAP,
                                    'values': state}
+
+    def _read_photon_interaction(self, MT):
+        self._print_info(23, MT)
+        
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.files.append(23)
+        
+        # Skip HEAD record
+        self._get_head_record()
+        
+        # Read cross section
+        params, rxn.cross_section = self._get_tab1_record()
+        if MT >= 534 and MT <= 599:
+            rxn.subshell_binding_energy = params[0]
+        if MT >= 534 and MT <= 572:
+            rxn.fluorescence_yield = params[1]
+        
+        # Skip SEND record
+        self._fh.readline()
+        
+    def _read_scattering_functions(self, MT):
+        self._print_info(27, MT)
+        
+        # Skip HEAD record
+        self._get_head_record()
+        
+        # Get scattering function
+        params, func = self._get_tab1_record()
+        
+        # Store in appropriate place
+        if MT in (502, 504):
+            rxn = self.reactions[MT]
+            rxn.scattering_factor = func
+        elif MT == 505:
+            rxn = self.reactions[502]
+            rxn.anomalous_scattering_imaginary = func
+        elif MT == 506:
+            rxn = self.reactions[502]
+            rxn.anomalous_scattering_real = func
+        
+        # Skip SEND record
+        self._fh.readline()
+        
+    def _read_atomic_relaxation(self):
+        self._print_info(28, 533)
+        
+        # Read HEAD record
+        params = self._get_head_record()
+        n_subshells = params[4]
+        
+        # Read list of data
+        subshells = {1: 'K', 2: 'L1', 3: 'L2', 4: 'L3', 5: 'M1',
+                     6: 'M2', 7: 'M3', 8: 'M4', 9: 'M5', 10: 'N1',
+                     11: 'N2', 12: 'N3', 13: 'N4', 14: 'N5', 15: 'N6',
+                     16: 'N7', 17: 'O1', 18: 'O2', 19: 'O3', 20: 'O4',
+                     21: 'O5', 22: 'O6', 23: 'O7', 24: 'O8', 25: 'O9',
+                     26: 'P1', 27: 'P2', 28: 'P3', 29: 'P4', 30: 'P5',
+                     31: 'P6', 32: 'P7', 33: 'P8', 34: 'P9', 35: 'P10',
+                     36: 'P11', 37: 'Q1', 38: 'Q2', 39: 'Q3', 0: None}
+        self.atomic_relaxation = {}
+        for i in range(n_subshells):
+             params, list_items = self._get_list_record()
+             subi = subshells[int(params[0])]
+             n_transitions = int(params[5])
+             ebi = list_items[0]
+             eln = int(list_items[1])
+             data = {'binding_energy': ebi, 'number_electrons': eln, 'transitions': []}
+             for j in range(n_transitions):
+                 subj = subshells[int(list_items[6*(j+1)])]
+                 subk = subshells[int(list_items[6*(j+1) + 1])]
+                 etr = list_items[6*(j+1) + 2]
+                 ftr = list_items[6*(j+1) + 3]
+                 data['transitions'].append((subj, subk, etr, ftr))
+             self.atomic_relaxation[subi] = data
+             
+        # Skip SEND record
+        self._fh.readline()
 
     def _get_text_record(self, line=None):
         if not line:
