@@ -57,7 +57,7 @@ def radiation_type(value):
     p = {0: 'gamma', 1: 'beta-', 2: 'ec/beta+', 3: 'IT',
          4: 'alpha', 5: 'neutron', 6: 'sf', 7: 'proton',
          8: 'e-', 9: 'xray', 10: 'unknown'}
-    if value % 1.0 = 0:
+    if value % 1.0 == 0:
         return p[int(value)]
     else:
         return (p[int(value)], p[int(10*value % 10)])
@@ -999,7 +999,7 @@ class Library(rx.RxLib):
             fh.close
         return fromendf_tok(s)
         
-class EndfTape(file)
+class EndfTape(file):
     def __init__(self, *args, **kwargs):
         file.__init__(self, *args, **kwargs)
         
@@ -1091,14 +1091,14 @@ class Evaluation(object):
         while True:
             # Find next section
             while True:
-            position = self._fh.tell()
-            line = self._fh.readline()
-            MAT = int(line[66:70])
-            MF = int(line[70:72])
-            MT = int(line[72:75])
-            if MT > 0 or MAT == 0:
-                self._fh.seek(position)
-                break
+                position = self._fh.tell()
+                line = self._fh.readline()
+                MAT = int(line[66:70])
+                MF = int(line[70:72])
+                MT = int(line[72:75])
+                if MT > 0 or MAT == 0:
+                    self._fh.seek(position)
+                    break
 
             # If end of material reached, exit loop
             if MAT == 0:
@@ -1184,19 +1184,19 @@ class Evaluation(object):
                 # Read File 10 -- cross sections for production of
                 # radioactive nuclides
                 self._read_production_xs(MT)
-                
-             elif MF == 23:
-                 # photon interaction data
-                 self._read_photon_interaction(MT)
-                 
-             elif MF == 27:
-                 # atomic form factors or scattering functions
-                 self._read_scattering_functions(MT)
-                 
-             elif MF == 28:
-                 # atomic relaxation data
-                 self._read_atomic_relaxation()
-            
+
+            elif MF == 23:
+                # photon interaction data
+                self._read_photon_interaction(MT)
+
+            elif MF == 27:
+                # atomic form factors or scattering functions
+                self._read_scattering_functions(MT)
+
+            elif MF == 28:
+                # atomic relaxation data
+                self._read_atomic_relaxation()
+
             else:
                 self._fh.seek_file_end()
 
