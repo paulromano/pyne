@@ -820,7 +820,7 @@ class NeutronTable(AceTable):
                 # No angular distribution data are given for this reaction,
                 # isotropic scattering is asssumed in LAB
                 if rxn.mftype == 13:
-                    energies = np.array([self.energy[reaction.IE], self.energy[-1]])
+                    energies = np.array([self.energy[rxn.IE], self.energy[-1]])
                 else:
                     energies = np.array([rxn.photon_yield.x[0],
                                          rxn.photon_yield.x[-1]])
