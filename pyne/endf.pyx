@@ -1992,37 +1992,46 @@ class Evaluation(object):
 
         # Get head record
         items = self._get_head_record()
-        inel['LAT'] = items[3]  # Temperature flag
-        inel['LASYM'] = items[4]  # Symmetry flag
+        inel['temperature_used'] = 'actual' if items[3] == 0 else '0.0253 eV'  # Temperature flag
+        inel['symmetric'] = (items[4] == 0)  # Symmetry flag
         header, B = self._get_list_record()
-        inel['LLN'] = header[2]
-        inel['NS'] = header[5]
+        inel['ln(S)'] = (header[2] == 1)
+        inel['num_non_principal'] = header[5]
         inel['B'] = B
         if B[0] != 0.0:
-            nbeta = self._get_tab2_record()
-            sabt = []
-            beta = []
-            for be in range(nbeta.NBT[0]):
+            tab2 = self._get_tab2_record()
+            n_beta = tab2.NBT[0]
+            for be in range(n_beta):
                 #Read record for first temperature (always present)
-                sabt_temp = []
-                temp = []
-                params, temp0 = self._get_tab1_record()
-                # Save S(be, 0, :)
-                sabt_temp.append(temp0)
-                beta.append(params[1])
-                temp.append(params[0])
-                LT = temp0.params[2]
-                for t in range(LT):
-                    # Read records for all the other temperatures
-                    headsab, sa = self._get_list_record()
-                    sabt_temp.append(sa)
-                    temp.append(headsab[0])
-                sabt.append(sabt_temp)
+                params, sab0 = self._get_tab1_record()
+                n_temps = params[2] + 1
 
-            # Prepare arrays for output
-            inel['sabt'] = sabt
-            inel['beta'] = np.array(beta)
-            inel['temp'] = np.array(temp)
+                # Create arrays on first pass through -- note that alphas and
+                # temperatures only need to be stored on first beta
+                if i_beta == 0:
+                    alpha_values = sab0.x
+                    n_alpha = alpha_values.shape[0]
+                    beta_values = np.zeros(n_beta)
+                    temp_values = np.zeros(n_temps)
+                    temp_values[0] = params[0]
+                    sab_values = np.zeros((n_alpha, n_beta, n_temps), order='F')
+
+                # Store beta and S(a,b,0) for first beta
+                beta_values[i_beta] = params[1]
+                sab_values[:, i_beta, 0] = sab0.y
+
+                for i_temp in range(1, n_temps):
+                    # Read records for all the other temperatures
+                    params, sabt = self._get_list_record()
+                    if i_beta == 0:
+                        temp_values[i_temp] = params[0]
+                    sab_values[:, i_beta, i_temp] = sabt
+
+            # Store arrays in dictionary
+            inel['scattering_law'] = sab_values
+            inel['alpha'] = alpha_values
+            inel['beta'] = beta_values
+            inel['temp'] = temp_values
 
         params, teff = self._get_tab1_record()
         inel['teff'] = teff
