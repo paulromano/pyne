@@ -998,11 +998,11 @@ class Library(rx.RxLib):
         if opened_here:
             fh.close
         return fromendf_tok(s)
-        
+
 class EndfTape(file):
     def __init__(self, *args, **kwargs):
         file.__init__(self, *args, **kwargs)
-        
+
     def at_end_of_tape(self):
         position = self.tell()
         line = self.readline()
@@ -1011,7 +1011,7 @@ class EndfTape(file):
         else:
             self.seek(position)
             return False
-            
+
     def seek_material_end(self):
         while True:
             line = self.readline()
@@ -1063,14 +1063,14 @@ class Evaluation(object):
         # file and a list of what data exists in the file
         self._read_header()
 
-        # Save starting position        
-        self._start_position = position
+        # Save starting position
+        self._start_position = self._fh.tell()
 
     def read(self, reactions=None, skip_mf=[], skip_mt=[]):
         """Reads reactions from the ENDF file of the Evaluation object. If no
         arguments are provided, this method will read all the reactions in the
         file. A single reaction can be read if provided.
-        
+
         Parameters
         ----------
         reactions : tuple or list of tuple, optional
@@ -1079,15 +1079,15 @@ class Evaluation(object):
             Files (MF) which should not be read
         skip_mt : list of int, optional
             Reactions (MT) which should not be read
-            
+
         """
-        
+
         # Make sure file is positioned correctly
         self._fh.seek(self._start_position)
-        
+
         if isinstance(reactions, tuple):
             reactions = [reactions]
-            
+
         while True:
             # Find next section
             while True:
@@ -1103,7 +1103,7 @@ class Evaluation(object):
             # If end of material reached, exit loop
             if MAT == 0:
                 break
-            
+
             # If there are files/reactions requested to be skipped, check them
             if MF in skip_mf:
                 self._fh.seek_file_end()
@@ -1111,13 +1111,13 @@ class Evaluation(object):
             if MT in skip_mt:
                 self._fh.seek_section_end()
                 continue
-        
+
             # If reading is restricted to certain reactions, check here
             if reactions and (MF, MT) not in reactions:
                 self._fh.seek_section_end()
                 continue
-            
-        
+
+
             # File 1 data
             if MF == 1:
                 if MT == 452:
@@ -2001,7 +2001,7 @@ class Evaluation(object):
         if B[0] != 0.0:
             tab2 = self._get_tab2_record()
             n_beta = tab2.NBT[0]
-            for be in range(n_beta):
+            for i_beta in range(n_beta):
                 #Read record for first temperature (always present)
                 params, sab0 = self._get_tab1_record()
                 n_temps = params[2] + 1
@@ -2031,7 +2031,7 @@ class Evaluation(object):
             inel['scattering_law'] = sab_values
             inel['alpha'] = alpha_values
             inel['beta'] = beta_values
-            inel['temp'] = temp_values
+            inel['temperature'] = temp_values
 
         params, teff = self._get_tab1_record()
         inel['teff'] = teff
@@ -2254,34 +2254,34 @@ class Evaluation(object):
 
     def _read_photon_interaction(self, MT):
         self._print_info(23, MT)
-        
+
         if MT not in self.reactions:
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
         rxn.files.append(23)
-        
+
         # Skip HEAD record
         self._get_head_record()
-        
+
         # Read cross section
         params, rxn.cross_section = self._get_tab1_record()
         if MT >= 534 and MT <= 599:
             rxn.subshell_binding_energy = params[0]
         if MT >= 534 and MT <= 572:
             rxn.fluorescence_yield = params[1]
-        
+
         # Skip SEND record
         self._fh.readline()
-        
+
     def _read_scattering_functions(self, MT):
         self._print_info(27, MT)
-        
+
         # Skip HEAD record
         self._get_head_record()
-        
+
         # Get scattering function
         params, func = self._get_tab1_record()
-        
+
         # Store in appropriate place
         if MT in (502, 504):
             rxn = self.reactions[MT]
@@ -2292,17 +2292,17 @@ class Evaluation(object):
         elif MT == 506:
             rxn = self.reactions[502]
             rxn.anomalous_scattering_real = func
-        
+
         # Skip SEND record
         self._fh.readline()
-        
+
     def _read_atomic_relaxation(self):
         self._print_info(28, 533)
-        
+
         # Read HEAD record
         params = self._get_head_record()
         n_subshells = params[4]
-        
+
         # Read list of data
         subshells = {1: 'K', 2: 'L1', 3: 'L2', 4: 'L3', 5: 'M1',
                      6: 'M2', 7: 'M3', 8: 'M4', 9: 'M5', 10: 'N1',
@@ -2327,7 +2327,7 @@ class Evaluation(object):
                  ftr = list_items[6*(j+1) + 3]
                  data['transitions'].append((subj, subk, etr, ftr))
              self.atomic_relaxation[subi] = data
-             
+
         # Skip SEND record
         self._fh.readline()
 
@@ -2768,12 +2768,12 @@ class AngularDistribution(object):
 class Reaction(object):
     """Data for a single reaction including its cross section and secondary
     angle/energy distribution.
-    
+
     Parameters
     ----------
     MT : int
         The MT number from the ENDF file.
-        
+
     Attributes
     ----------
     angular_distribution : AngularDistribution
@@ -2791,7 +2791,7 @@ class Reaction(object):
         Mass difference Q value in eV
     Q_reaction : float
         Reaction Q value in eV
- 
+
     """
 
     def __init__(self, MT):
