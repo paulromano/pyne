@@ -1140,7 +1140,7 @@ class Evaluation(object):
                 if MT == 151:
                     self._read_resonances()
                 else:
-                    self._seek_section_end()
+                    self._fh.seek_section_end()
 
             elif MF == 3:
                 # File 3 -- Reaction cross sections
