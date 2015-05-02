@@ -45,7 +45,6 @@ libraries = {0: 'ENDF/B', 1: 'ENDF/A', 2: 'JEFF', 3: 'EFF',
              4: 'ENDF/B High Energy', 5: 'CENDL', 6: 'JENDL',
              31: 'INDL/V', 32: 'INDL/A', 33: 'FENDL', 34: 'IRDF',
              35: 'BROND', 36: 'INGDB-90', 37: 'FENDL/A', 41: 'BROND'}
-resonance_types = {1: 'SLBW', 2: 'MLBW', 3: 'RM', 4: 'AA', 7: 'RML'}
 FILE1_R = re.compile(r'1451 *\d{1,5}$')
 CONTENTS_R = re.compile(' +\d{1,2} +\d{1,3} +\d{1,10} +')
 SPACE66_R = re.compile(' {66}')
@@ -1756,339 +1755,39 @@ class Evaluation(object):
             isotope['ranges'] = []
 
             for j in range(NER):
-                # Create dictionary for energy range
-                erange = {}
-                isotope['ranges'].append(erange)
-
                 items = self._get_cont_record()
-                erange['energy_min'] = items[0]
-                erange['energy_max'] = items[1]
-                LRU = items[2]  # flag for resolved (1)/unresolved (2)
-                LRF = items[3]  # resonance representation
-                erange['NRO'] = items[4]  # flag for energy dependence of scattering radius
-                erange['NAPS'] = items[5]  # flag controlling use of channel/scattering radius
+                emin, emax = items[0:2]  # min/max energies of range
+                resonance_flag = items[2]  # flag for resolved (1)/unresolved (2)
+                resonance_formalism = items[3]  # resonance formalism
+                nro = items[4]  # flag for energy dependence of scattering radius
+                naps = items[5]  # flag controlling use of channel/scattering radius
 
-                if LRU == 0 and erange['NRO'] == 0:
+                if resonance_flag == 0 and nro == 0:
                     # Only scattering radius specified
-                    erange['type'] = 'scattering_radius'
+                    erange = ScatteringRadius(emin, emax, nro, naps)
                     items = self._get_cont_record()
-                    erange['spin'] = items[0]
-                    erange['scattering_radius'] = items[1]
-                elif LRU == 1:
+                    erange.spin = items[0]
+                    erange.scattering_radius = items[1]
+
+                elif resonance_flag == 1:
                     # resolved resonance region
-                    erange['type'] = 'resolved'
-                    erange['representation'] = resonance_types[LRF]
-                    self._read_resolved(erange)
+                    erange = _formalisms[resonance_formalism](
+                        emin, emax, nro, naps)
+                    erange.read(self)
                     if NIS == 1:
                         res['resolved'] = erange
-                elif LRU == 2:
+
+                elif resonance_flag == 2:
                     # unresolved resonance region
-                    erange['type'] = 'unresolved'
-                    self._read_unresolved(erange, LFW, LRF)
+                    erange = Unresolved(emin, emax, nro, naps)
+                    erange.fission_widths = (LFW == 1)
+                    erange.LRF = resonance_formalism
+                    erange.read(self)
                     if NIS == 1:
                         res['unresolved'] = erange
 
-    def _read_resolved(self, erange):
-        if erange['representation'] in ('SLBW', 'MLBW'):
-            # -------------- Single- or Multi-level Breit Wigner ---------------
+                isotope['ranges'].append(erange)
 
-            # Read energy-dependent scattering radius if present
-            if erange['NRO'] != 0:
-                params, erange['scattering_radius'] = self._get_tab1_record()
-
-            # Other scatter radius parameters
-            items = self._get_cont_record()
-            erange['spin'] = items[0]
-            if erange['NRO'] == 0:
-                erange['scattering_radius'] = items[1]
-            NLS = items[4]  # Number of l-values
-
-            erange['resonances'] = []
-
-            # Read resonance widths, J values, etc
-            for l in range(NLS):
-                headerItems, items = self._get_list_record()
-                QX, L, LRX = headerItems[1:4]
-                energy = items[0::6]
-                spin = items[1::6]
-                GT = items[2::6]
-                GN = items[3::6]
-                GG = items[4::6]
-                GF = items[5::6]
-                for i, E in enumerate(energy):
-                    resonance = BreitWigner()
-                    resonance.QX = QX
-                    resonance.L = L
-                    resonance.LRX = LRX
-                    resonance.E = energy[i]
-                    resonance.J = spin[i]
-                    resonance.GT = GT[i]
-                    resonance.GN = GN[i]
-                    resonance.GG = GG[i]
-                    resonance.GF = GF[i]
-                    erange['resonances'].append(resonance)
-
-        elif erange['representation'] == 'RM':
-            # ------------------------- Reich-Moore ----------------------------
-
-            # Read energy-dependent scattering radius if present
-            if erange['NRO'] != 0:
-                params, erange['scattering_radius'] = self._get_tab1_record()
-
-            # Other scatter radius parameters
-            items = self._get_cont_record()
-            erange['spin'] = items[0]
-            if erange['NRO'] == 0:
-                erange['scattering_radius'] = items[1]
-            erange['LAD'] = items[3]  # Flag for angular distribution
-            NLS = items[4]  # Number of l-values
-            NLSC = items[5]  # Number of l-values for convergence
-
-            erange['resonances'] = []
-
-            # Read resonance widths, J values, etc
-            for l in range(NLS):
-                headerItems, items = self._get_list_record()
-                APL, L = headerItems[1:3]
-                energy = items[0::6]
-                spin = items[1::6]
-                GN = items[2::6]
-                GG = items[3::6]
-                GFA = items[4::6]
-                GFB = items[5::6]
-                for i, E in enumerate(energy):
-                    resonance = ReichMoore()
-                    resonance.APL = APL
-                    resonance.L = L
-                    resonance.E = energy[i]
-                    resonance.J = spin[i]
-                    resonance.GN = GN[i]
-                    resonance.GG = GG[i]
-                    resonance.GFA = GFA[i]
-                    resonance.GFB = GFB[i]
-                    erange['resonances'].append(resonance)
-
-        elif erange['representation'] == 'AA':
-            # --------------------------- Adler-Adler --------------------------
-
-            # Read energy-dependent scattering radius if present
-            if erange['NRO'] != 0:
-                params, erange['scattering_radius'] = self._get_tab1_record()
-
-            # Other scatter radius parameters
-            items = self._get_cont_record()
-            erange['spin'] = items[0]
-            if erange['NRO'] == 0:
-                erange['scattering_radius'] = items[1]
-            NLS = items[4]  # Number of l-values
-
-            # Get AT, BT, AF, BF, AC, BC constants
-            items, values = self._get_list_record()
-            erange['LI'] = items[2]
-            NX = items[5]
-            erange['AT'] = np.asarray(values[:4])
-            erange['BT'] = np.asarray(values[4:6])
-            if NX == 2:
-                erange['AC'] = np.asarray(values[6:10])
-                erange['BC'] = np.asarray(values[10:12])
-            elif NX == 3:
-                erange['AF'] = np.asarray(values[6:10])
-                erange['BF'] = np.asarray(values[10:12])
-                erange['AC'] = np.asarray(values[12:16])
-                erange['BC'] = np.asarray(values[16:18])
-
-            erange['resonances'] = []
-
-            for ls in range(NLS):
-                items = self._get_cont_record()
-                l_value = items[2]
-                NJS = items[4]
-                for j in range(NJS):
-                    items, values = self._get_list_record()
-                    AJ = items[0]
-                    NLJ = items[5]
-                    for res in range(NLJ):
-                        resonance = AdlerAdler()
-                        resonance.L, resonance.J = l_value, AJ
-                        resonance.DET = values[12*res]
-                        resonance.DWT = values[12*res + 1]
-                        resonance.DRT = values[12*res + 2]
-                        resonance.DIT = values[12*res + 3]
-                        resonance.DEF_ = values[12*res + 4]
-                        resonance.DWF = values[12*res + 5]
-                        resonance.GRF = values[12*res + 6]
-                        resonance.GIF = values[12*res + 7]
-                        resonance.DEC = values[12*res + 8]
-                        resonance.DWC = values[12*res + 9]
-                        resonance.GRC = values[12*res + 10]
-                        resonance.GIC = values[12*res + 11]
-                        erange['resonances'].append(resonance)
-
-        elif erange['representation'] == 'RML':
-            items = self._get_cont_record()
-            erange['IFG'] = items[2]  # reduced width amplitude?
-            erange['KRM'] = items[3]  # Specify which formulae are used
-            n_spin_groups = items[4]  # Number of Jpi values (NJS)
-            KRL = items[5]  # Flag for non-relativistic kinematics
-
-            items, values = self._get_list_record()
-            erange['particle_pairs'] = []
-            n_pairs = items[5]//2  # Number of particle pairs (NPP)
-            for i in range(n_pairs):
-                pp = {'mass_a': values[12*i],
-                      'mass_b': values[12*i + 1],
-                      'z_a': values[12*i + 2],
-                      'z_b': values[12*i + 3],
-                      'spin_a': values[12*i + 4],
-                      'spin_b': values[12*i + 5],
-                      'q': values[12*i + 6],
-                      'pnt': values[12*i + 7],
-                      'shift': values[12*i + 8],
-                      'MT': values[12*i + 9],
-                      'parity_a': values[12*i + 10],
-                      'parity_b': values[12*i + 11]}
-                erange['particle_pairs'].append(pp)
-
-            # loop over spin groups
-            erange['spin_groups'] = []
-            for i in range(n_spin_groups):
-                sg = {'channels': []}
-                erange['spin_groups'].append(sg)
-
-                items, values = self._get_list_record()
-                J = items[0]
-                parity = items[1]
-                kbk = items[2]
-                kps = items[3]
-                n_channels = items[5]
-                for j in range(n_channels):
-                    channel = {}
-                    channel['particle_pair'] = values[6*j]
-                    channel['l'] = values[6*j + 1]
-                    channel['spin'] = values[6*j + 2]
-                    channel['boundary'] = values[6*j + 3]
-                    channel['effective_radius'] = values[6*j + 4]
-                    channel['true_radius'] = values[6*j + 5]
-                    sg['channels'].append(channel)
-
-                items, values = self._get_list_record()
-                n_resonances = items[3]
-                sg['resonance_energies'] = np.zeros(n_resonances)
-                sg['resonance_widths'] = np.zeros((n_channels, n_resonances))
-                m = n_channels//6 + 1
-                for j in range(n_resonances):
-                    sg['resonance_energies'][j] = values[m*j]
-                    for k in range(n_channels):
-                        sg['resonance_widths'][k,j] = values[m*j + k + 1]
-
-
-    def _read_unresolved(self, erange, LFW, LRF):
-        erange['fission_widths'] = (LFW == 1)
-        erange['LRF'] = LRF
-
-        # Read energy-dependent scattering radius if present
-        if erange['NRO'] != 0:
-            params, erange['scattering_radius'] = self._get_tab1_record()
-
-        # Get SPI, AP, and LSSF
-        if not (LFW == 1 and LRF == 1):
-            items = self._get_cont_record()
-            erange['spin'] = items[0]
-            if erange['NRO'] == 0:
-                erange['scatter_radius'] = items[1]
-            erange['LSSF'] = items[2]
-
-        if LFW == 0 and LRF == 1:
-            # Case A -- fission widths not given, all parameters are
-            # energy-independent
-            NLS = items[4]
-            erange['l_values'] = np.zeros(NLS)
-            erange['parameters'] = {}
-            for ls in range(NLS):
-                items, values = self._get_list_record()
-                l = items[2]
-                NJS = items[5]
-                erange['l_values'][ls] = l
-                params = {}
-                erange['parameters'][l] = params
-                params['d'] = np.asarray(values[0::6])
-                params['j'] = np.asarray(values[1::6])
-                params['amun'] = np.asarray(values[2::6])
-                params['gn0'] = np.asarray(values[3::6])
-                params['gg'] = np.asarray(values[4::6])
-                # params['gf'] = np.zeros(NJS)
-
-        elif LFW == 1 and LRF == 1:
-            # Case B -- fission widths given, only fission widths are
-            # energy-dependent
-            items, erange['energies'] = self._get_list_record()
-            erange['spin'] = items[0]
-            if erange['NRO'] == 0:
-                erange['scatter_radius'] = items[1]
-            erange['LSSF'] = items[2]
-            NE, NLS = items[4:6]
-            erange['l_values'] = np.zeros(NLS)
-            erange['parameters'] = {}
-            for ls in range(NLS):
-                items = self._get_cont_record()
-                l = items[2]
-                NJS = items[4]
-                erange['l_values'][ls] = l
-                params = {}
-                erange['parameters'][l] = params
-                params['d'] = np.zeros(NJS)
-                params['j'] = np.zeros(NJS)
-                params['amun'] = np.zeros(NJS)
-                params['gn0'] = np.zeros(NJS)
-                params['gg'] = np.zeros(NJS)
-                params['gf'] = []
-                for j in range(NJS):
-                    items, values = self._get_list_record()
-                    muf = items[3]
-                    params['d'][j] = values[0]
-                    params['j'][j] = values[1]
-                    params['amun'][j] = values[2]
-                    params['gn0'][j] = values[3]
-                    params['gg'][j] = values[4]
-                    params['gf'].append(np.asarray(values[6:]))
-
-        elif LRF == 2:
-            # Case C -- all parameters are energy-dependent
-            NLS = items[4]
-            erange['l_values'] = np.zeros(NLS)
-            erange['parameters'] = {}
-            for ls in range(NLS):
-                items = self._get_cont_record()
-                l = items[2]
-                NJS = items[4]
-                erange['l_values'][ls] = l
-                params = {}
-                erange['parameters'][l] = params
-                params['j'] = np.zeros(NJS)
-                params['amux'] = np.zeros(NJS)
-                params['amun'] = np.zeros(NJS)
-                params['amug'] = np.zeros(NJS)
-                params['amuf'] = np.zeros(NJS)
-                params['energies'] = []
-                params['d'] = []
-                params['gx'] = []
-                params['gn0'] = []
-                params['gg'] = []
-                params['gf'] = []
-                for j in range(NJS):
-                    items, values = self._get_list_record()
-                    ne = items[5]
-                    params['j'][j] = items[0]
-                    params['amux'][j] = values[2]
-                    params['amun'][j] = values[3]
-                    params['amug'][j] = values[4]
-                    params['amuf'][j] = values[5]
-                    params['energies'].append(np.asarray(values[6::6]))
-                    params['d'].append(np.asarray(values[7::6]))
-                    params['gx'].append(np.asarray(values[8::6]))
-                    params['gn0'].append(np.asarray(values[9::6]))
-                    params['gg'].append(np.asarray(values[10::6]))
-                    params['gf'].append(np.asarray(values[11::6]))
 
     def _read_thermal_elastic(self):
         self._print_info(7, 2)
@@ -2940,6 +2639,352 @@ class Reaction(object):
         return '<ENDF Reaction: MT={0}, {1}>'.format(self.MT, label(self.MT))
 
 
+class ResonanceRange(object):
+    def __init__(self, emin, emax, nro, naps):
+        self.energy_min = emin
+        self.energy_max = emax
+        self.nro = nro
+        self.naps = naps
+
+    def read(self, ev):
+        raise NotImplementedError
+
+    def reconstruct(self):
+        raise NotImplementedError
+
+
+class MultiLevelBreitWigner(ResonanceRange):
+    def __init__(self, emin, emax, nro, naps):
+        super(MultiLevelBreitWigner, self).__init__(emin, emax, nro, naps)
+
+    def read(self, ev):
+        # Read energy-dependent scattering radius if present
+        if self.nro != 0:
+            params, self.scattering_radius = ev._get_tab1_record()
+
+        # Other scatter radius parameters
+        items = ev._get_cont_record()
+        self.spin = items[0]
+        if self.nro == 0:
+            self.scattering_radius = items[1]
+        NLS = items[4]  # Number of l-values
+
+        self.resonances = []
+        self.l_values = np.zeros(NLS, int)
+        self.q = np.zeros(NLS)
+        self.competitive = np.zeros(NLS, bool)
+
+        # Read resonance widths, J values, etc
+        for l in range(NLS):
+            items, values = ev._get_list_record()
+            self.q[l] = items[1]
+            self.l_values[l] = items[2]
+            self.competitive[l] = items[3]
+            energy = values[0::6]
+            spin = values[1::6]
+            GT = values[2::6]
+            GN = values[3::6]
+            GG = values[4::6]
+            GF = values[5::6]
+            for i, E in enumerate(energy):
+                resonance = Resonance()
+                resonance.E = energy[i]
+                resonance.J = spin[i]
+                resonance.GT = GT[i]
+                resonance.GN = GN[i]
+                resonance.GG = GG[i]
+                resonance.GF = GF[i]
+                self.resonances.append(resonance)
+
+
+class SingleLevelBreitWigner(MultiLevelBreitWigner):
+    def __init__(self, emin, emax, nro, naps):
+        super(SingleLevelBreitWigner, self).__init__(emin, emax, nro, naps)
+
+
+class ReichMoore(ResonanceRange):
+    def __init__(self, emin, emax, nro, naps):
+        super(ReichMoore, self).__init__(emin, emax, nro, naps)
+
+    def read(self, ev):
+        # Read energy-dependent scattering radius if present
+        if self.nro != 0:
+            params, self.scattering_radius = ev._get_tab1_record()
+
+        # Other scatter radius parameters
+        items = ev._get_cont_record()
+        self.spin = items[0]
+        if self.nro == 0:
+            self.scattering_radius = items[1]
+        self.LAD = items[3]  # Flag for angular distribution
+        NLS = items[4]  # Number of l-values
+        self.NLSC = items[5]  # Number of l-values for convergence
+
+        self.resonances = []
+        self.apl = np.zeros(NLS)
+        self.l_values = np.zeros(NLS)
+
+        # Read resonance widths, J values, etc
+        for l in range(NLS):
+            items, values = ev._get_list_record()
+            self.apl[l] = items[1]
+            self.l_values[l] = items[2]
+            energy = values[0::6]
+            spin = values[1::6]
+            GN = values[2::6]
+            GG = values[3::6]
+            GFA = values[4::6]
+            GFB = values[5::6]
+            for i, E in enumerate(energy):
+                resonance = Resonance()
+                resonance.E = energy[i]
+                resonance.J = spin[i]
+                resonance.GN = GN[i]
+                resonance.GG = GG[i]
+                resonance.GFA = GFA[i]
+                resonance.GFB = GFB[i]
+                self.resonances.append(resonance)
+
+
+class AdlerAdler(ResonanceRange):
+    def __init__(self, emin, emax, nro, naps):
+        super(AdlerAdler, self).__init__(emin, emax, nro, naps)
+
+    def read(self, ev):
+        # Read energy-dependent scattering radius if present
+        if self.nro != 0:
+            params, self.scattering_radius = ev._get_tab1_record()
+
+        # Other scatter radius parameters
+        items = ev._get_cont_record()
+        self.spin = items[0]
+        if self.nro == 0:
+            self.scattering_radius = items[1]
+        NLS = items[4]  # Number of l-values
+
+        # Get AT, BT, AF, BF, AC, BC constants
+        items, values = ev._get_list_record()
+        self.LI = items[2]
+        NX = items[5]
+        self.AT = np.asarray(values[:4])
+        self.BT = np.asarray(values[4:6])
+        if NX == 2:
+            self.AC = np.asarray(values[6:10])
+            self.BC = np.asarray(values[10:12])
+        elif NX == 3:
+            self.AF = np.asarray(values[6:10])
+            self.BF = np.asarray(values[10:12])
+            self.AC = np.asarray(values[12:16])
+            self.BC = np.asarray(values[16:18])
+
+        self.resonances = []
+
+        for ls in range(NLS):
+            items = ev._get_cont_record()
+            l_value = items[2]
+            NJS = items[4]
+            for j in range(NJS):
+                items, values = ev._get_list_record()
+                AJ = items[0]
+                NLJ = items[5]
+                for res in range(NLJ):
+                    resonance = Resonance()
+                    resonance.L, resonance.J = l_value, AJ
+                    resonance.DET = values[12*res]
+                    resonance.DWT = values[12*res + 1]
+                    resonance.DRT = values[12*res + 2]
+                    resonance.DIT = values[12*res + 3]
+                    resonance.DEF_ = values[12*res + 4]
+                    resonance.DWF = values[12*res + 5]
+                    resonance.GRF = values[12*res + 6]
+                    resonance.GIF = values[12*res + 7]
+                    resonance.DEC = values[12*res + 8]
+                    resonance.DWC = values[12*res + 9]
+                    resonance.GRC = values[12*res + 10]
+                    resonance.GIC = values[12*res + 11]
+                    self.resonances.append(resonance)
+
+
+class RMatrixLimited(ResonanceRange):
+    def __init__(self, emin, emax, nro, naps):
+        super(RMatrixLimited, self).__init__(emin, emax, nro, naps)
+
+    def read(self, ev):
+        items = ev._get_cont_record()
+        self.IFG = items[2]  # reduced width amplitude?
+        self.KRM = items[3]  # Specify which formulae are used
+        n_spin_groups = items[4]  # Number of Jpi values (NJS)
+        KRL = items[5]  # Flag for non-relativistic kinematics
+
+        items, values = ev._get_list_record()
+        self.particle_pairs = []
+        n_pairs = items[5]//2  # Number of particle pairs (NPP)
+        for i in range(n_pairs):
+            pp = {'mass_a': values[12*i],
+                  'mass_b': values[12*i + 1],
+                  'z_a': values[12*i + 2],
+                  'z_b': values[12*i + 3],
+                  'spin_a': values[12*i + 4],
+                  'spin_b': values[12*i + 5],
+                  'q': values[12*i + 6],
+                  'pnt': values[12*i + 7],
+                  'shift': values[12*i + 8],
+                  'MT': values[12*i + 9],
+                  'parity_a': values[12*i + 10],
+                  'parity_b': values[12*i + 11]}
+            self.particle_pairs.append(pp)
+
+        # loop over spin groups
+        self.spin_groups = []
+        for i in range(n_spin_groups):
+            sg = {'channels': []}
+            self.spin_groups.append(sg)
+
+            items, values = ev._get_list_record()
+            J = items[0]
+            parity = items[1]
+            kbk = items[2]
+            kps = items[3]
+            n_channels = items[5]
+            for j in range(n_channels):
+                channel = {}
+                channel['particle_pair'] = values[6*j]
+                channel['l'] = values[6*j + 1]
+                channel['spin'] = values[6*j + 2]
+                channel['boundary'] = values[6*j + 3]
+                channel['effective_radius'] = values[6*j + 4]
+                channel['true_radius'] = values[6*j + 5]
+                sg['channels'].append(channel)
+
+            items, values = ev._get_list_record()
+            n_resonances = items[3]
+            sg['resonance_energies'] = np.zeros(n_resonances)
+            sg['resonance_widths'] = np.zeros((n_channels, n_resonances))
+            m = n_channels//6 + 1
+            for j in range(n_resonances):
+                sg['resonance_energies'][j] = values[m*j]
+                for k in range(n_channels):
+                    sg['resonance_widths'][k,j] = values[m*j + k + 1]
+
+
+class Unresolved(ResonanceRange):
+    def __init__(self, emin, emax, nro, naps):
+        super(Unresolved, self).__init__(emin, emax, nro, naps)
+
+    def read(self, ev):
+        # Read energy-dependent scattering radius if present
+        if self.nro != 0:
+            params, self.scattering_radius = ev._get_tab1_record()
+
+        # Get SPI, AP, and LSSF
+        if not (self.fission_widths and self.LRF == 1):
+            items = ev._get_cont_record()
+            self.spin = items[0]
+            if self.nro == 0:
+                self.scattering_radius = items[1]
+            self.LSSF = items[2]
+
+        if not self.fission_widths and self.LRF == 1:
+            # Case A -- fission widths not given, all parameters are
+            # energy-independent
+            NLS = items[4]
+            self.l_values = np.zeros(NLS)
+            self.parameters = {}
+            for ls in range(NLS):
+                items, values = ev._get_list_record()
+                l = items[2]
+                NJS = items[5]
+                self.l_values[ls] = l
+                params = {}
+                self.parameters[l] = params
+                params['d'] = np.asarray(values[0::6])
+                params['j'] = np.asarray(values[1::6])
+                params['amun'] = np.asarray(values[2::6])
+                params['gn0'] = np.asarray(values[3::6])
+                params['gg'] = np.asarray(values[4::6])
+                # params['gf'] = np.zeros(NJS)
+
+        elif self.fission_widths and self.LRF == 1:
+            # Case B -- fission widths given, only fission widths are
+            # energy-dependent
+            items, self.energies = ev._get_list_record()
+            self.spin = items[0]
+            if self.nro == 0:
+                self.scatter_radius = items[1]
+            self.LSSF = items[2]
+            NE, NLS = items[4:6]
+            self.l_values = np.zeros(NLS)
+            self.parameters = {}
+            for ls in range(NLS):
+                items = ev._get_cont_record()
+                l = items[2]
+                NJS = items[4]
+                self.l_values[ls] = l
+                params = {}
+                self.parameters[l] = params
+                params['d'] = np.zeros(NJS)
+                params['j'] = np.zeros(NJS)
+                params['amun'] = np.zeros(NJS)
+                params['gn0'] = np.zeros(NJS)
+                params['gg'] = np.zeros(NJS)
+                params['gf'] = []
+                for j in range(NJS):
+                    items, values = ev._get_list_record()
+                    muf = items[3]
+                    params['d'][j] = values[0]
+                    params['j'][j] = values[1]
+                    params['amun'][j] = values[2]
+                    params['gn0'][j] = values[3]
+                    params['gg'][j] = values[4]
+                    params['gf'].append(np.asarray(values[6:]))
+
+        elif self.LRF == 2:
+            # Case C -- all parameters are energy-dependent
+            NLS = items[4]
+            self.l_values = np.zeros(NLS)
+            self.parameters = {}
+            for ls in range(NLS):
+                items = ev._get_cont_record()
+                l = items[2]
+                NJS = items[4]
+                self.l_values[ls] = l
+                params = {}
+                self.parameters[l] = params
+                params['j'] = np.zeros(NJS)
+                params['amux'] = np.zeros(NJS)
+                params['amun'] = np.zeros(NJS)
+                params['amug'] = np.zeros(NJS)
+                params['amuf'] = np.zeros(NJS)
+                params['energies'] = []
+                params['d'] = []
+                params['gx'] = []
+                params['gn0'] = []
+                params['gg'] = []
+                params['gf'] = []
+                for j in range(NJS):
+                    items, values = ev._get_list_record()
+                    ne = items[5]
+                    params['j'][j] = items[0]
+                    params['amux'][j] = values[2]
+                    params['amun'][j] = values[3]
+                    params['amug'][j] = values[4]
+                    params['amuf'][j] = values[5]
+                    params['energies'].append(np.asarray(values[6::6]))
+                    params['d'].append(np.asarray(values[7::6]))
+                    params['gx'].append(np.asarray(values[8::6]))
+                    params['gn0'].append(np.asarray(values[9::6]))
+                    params['gg'].append(np.asarray(values[10::6]))
+                    params['gf'].append(np.asarray(values[11::6]))
+
+
+class ScatteringRadius(ResonanceRange):
+    def __init__(self, emin, emax, nro, naps):
+        super(ScatteringRadius, self).__init__(emin, emax, nro, naps)
+
+
+
+_formalisms = {1: SingleLevelBreitWigner, 2: MultiLevelBreitWigner,
+               3: ReichMoore, 4: AdlerAdler, 7: RMatrixLimited}
 
 class Resonance(object):
     def __init__(self):
@@ -2952,26 +2997,6 @@ class BreitWigner(Resonance):
 
     def __repr__(self):
         return '<Breit-Wigner Resonance: l={0.L} J={0.J} E={0.E}>'.format(self)
-
-
-
-class ReichMoore(Resonance):
-    def __init__(self):
-        pass
-
-    def __repr__(self):
-        return '<Reich-Moore Resonance: l={0.L} J={0.J} E={0.E}>'.format(self)
-
-
-
-class AdlerAdler(Resonance):
-    def __init__(self):
-        pass
-
-
-class RMatrixLimited(Resonance):
-    def __init__(self):
-        pass
 
 
 class NotFound(Exception):
