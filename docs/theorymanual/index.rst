@@ -1,9 +1,9 @@
-.. _theorymanual:
+.. _ahot_solvers:
 
 =============
 Theory Manual
 =============
-Welcome to the PyNE Theory Manual!  This manual will guide you through the 
+Welcome to the PyNE Theory Manual!  This manual will guide you through the
 mathematics and physics underlying PyNE.
 
 The following describe methods implemented natively in PyNE:
@@ -11,17 +11,14 @@ The following describe methods implemented natively in PyNE:
 .. toctree::
     :maxdepth: 1
 
-    chain_solve.rst
-    cross_section_models.rst
-    enrichment.rst
-    materials.rst
-    source_sampling.rst
-    mesh_based_variance_reduction.rst
-    nuclear_reaction_channels.rst
-    r2s.rst
-    simplesim.rst
-    bins.rst
+    spatial_solvers.rst
+    nucname
+    decay
+    data
+    source_sampling
+    variance_reduction
+    r2s
+    bins
 
 For information on methods for which PyNE provides an interface but does not
 implement natively, please refer to the manuals associated with those methods.
-

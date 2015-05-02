@@ -23,9 +23,7 @@ import re
 import os
 from collections import OrderedDict, Iterable
 from warnings import warn
-from math import exp, log
-from pyne.utils import VnVWarning
-import IPython
+from pyne.utils import QAWarning
 
 cimport numpy as np
 import numpy as np
@@ -41,12 +39,12 @@ from pyne.utils import fromendf_tok, endftod
 
 np.import_array()
 
-warn(__name__ + " is not yet V&V compliant.", VnVWarning)
+warn(__name__ + ' is not yet QA compliant.', QAWarning)
 
-libraries = {0: "ENDF/B", 1: "ENDF/A", 2: "JEFF", 3: "EFF",
-             4: "ENDF/B High Energy", 5: "CENDL", 6: "JENDL",
-             31: "INDL/V", 32: "INDL/A", 33: "FENDL", 34: "IRDF",
-             35: "BROND", 36: "INGDB-90", 37: "FENDL/A", 41: "BROND"}
+libraries = {0: 'ENDF/B', 1: 'ENDF/A', 2: 'JEFF', 3: 'EFF',
+             4: 'ENDF/B High Energy', 5: 'CENDL', 6: 'JENDL',
+             31: 'INDL/V', 32: 'INDL/A', 33: 'FENDL', 34: 'IRDF',
+             35: 'BROND', 36: 'INGDB-90', 37: 'FENDL/A', 41: 'BROND'}
 resonance_types = {1: 'SLBW', 2: 'MLBW', 3: 'RM', 4: 'AA', 7: 'RML'}
 FILE1_R = re.compile(r'1451 *\d{1,5}$')
 CONTENTS_R = re.compile(' +\d{1,2} +\d{1,3} +\d{1,10} +')
@@ -72,17 +70,42 @@ class Library(rx.RxLib):
         self.mat_dict = {}
         self.more_files = True
         self.intdict = {1: self._histogram, 2: self._linlin, 3: self._linlog, 4:
-                        self._loglin, 5: self._loglog, 6:self._chargedparticles,
-                        11: self._histogram, 12: self._linlin, 13: self._linlog,
-                        14: self._loglin, 15: self._loglog, 21: self._histogram,
-                        22: self._linlin, 23: self._linlog, 24: self._loglin,
-                        25: self._loglog}
+                        self._loglin, 5: self._loglog, 6:
+                        self._chargedparticles, 11: self._histogram,
+                        12: self._linlin, 13: self._linlog, 14: self._loglin,
+                        15: self._loglog, 21: self._histogram, 22: self._linlin,
+                        23: self._linlog, 24: self._loglin, 25: self._loglog}
         self.chars_til_now = 0
         self.offset = 0
         self.fh = fh
+        self._set_line_length()
+        # read first line (Tape ID)
+        self._read_tpid()
+        # read headers for all materials
         while self.more_files:
             self._read_headers()
 
+    def _set_line_length(self):
+        opened_here = False
+        if isinstance(self.fh, str):
+            fh = open(self.fh, 'rU')
+            opened_here = True
+        else:
+            fh = self.fh
+
+        # Make sure the newlines attribute is set: read a couple of lines
+        # and rewind to the beginning.
+        # Yes, we need to read two lines to make sure that fh.newlines gets
+        # set. One line seems to be enough for *nix-style line terminators, but
+        # two seem to be necessary for Windows-style terminators.
+        fh.seek(0)
+        fh.readline()
+        fh.readline()
+        self.line_length = 82 if fh.newlines=='\r\n' else 81
+        fh.seek(0)
+
+        if opened_here:
+            fh.close()
 
     def load(self):
         """load()
@@ -95,7 +118,7 @@ class Library(rx.RxLib):
         """
         opened_here = False
         if isinstance(self.fh, basestring):
-            fh = open(self.fh, 'r')
+            fh = open(self.fh, 'rU')
             opened_here = True
         else:
             fh = self.fh
@@ -106,48 +129,71 @@ class Library(rx.RxLib):
             fh.close()
         return data
 
+    def _read_tpid(self):
+        if self.chars_til_now == 0:
+            opened_here = False
+            if isinstance(self.fh, basestring):
+                fh = open(self.fh, 'rU')
+                opened_here = True
+            else:
+                fh = self.fh
+            line = fh.readline()
+            self.chars_til_now = len(line) + self.line_length - 81
+            self.offset = self.line_length - self.chars_til_now
+        else:
+            warn('TPID is the first line, has been read already', UserWarning)
+
     def _read_headers(self):
         cdef int nuc
         cdef int mat_id
         cdef double nucd
         opened_here = False
         if isinstance(self.fh, basestring):
-            fh = open(self.fh, 'r')
+            fh = open(self.fh, 'rU')
             opened_here = True
         else:
             fh = self.fh
-        # Skip the first line and get the material ID.
+        # Go to current file position
         fh.seek(self.chars_til_now)
-        len_headline = len(fh.readline())
-        self.offset += 81 - len_headline
+        # get mat_id
         line = fh.readline()
         mat_id = int(line[66:70].strip() or -1)
-        # originally in a float version of ZZAAA.M, ie 94242.1
-        nuc = cpp_nucname.id(<int> (endftod(line[:11])*10))
+        # store position of read
+        pos = fh.tell()
+        # check for isomer (LIS0/LISO entry)
+        matflagstring = line + fh.read(3*self.line_length)
+        flagkeys = ['ZA', 'AWR', 'LRP', 'LFI', 'NLIB', 'NMOD', 'ELIS',
+                    'STA', 'LIS', 'LIS0', 0, 'NFOR', 'AWI', 'EMAX',
+                    'LREL', 0, 'NSUB', 'NVER', 'TEMP', 0, 'LDRV',
+                    0, 'NWD', 'NXC']
+        flags = dict(zip(flagkeys, fromendf_tok(matflagstring)))
+        nuc = cpp_nucname.id(<int> (<int> flags['ZA']*10000 + flags['LIS0']))
+        # go back to line after first line
+        fh.seek(pos)
         # Make a new dict in self.structure to contain the material data.
         if nuc not in self.structure:
             self.structure.update(
-                {nuc:{'styles': "", 'docs': [], 'particles': [], 'data': {},
-                         'matflags': {}}})
-            self.mat_dict.update({nuc:{'end_line':[],
-                                          'mfs':{}}})
+                {nuc: {'styles': '', 'docs': [], 'particles': [], 'data': {},
+                       'matflags': {}}})
+            self.mat_dict.update({nuc: {'end_line': [],
+                                        'mfs': {}}})
         # Parse header (all lines with 1451)
         mf = 1
-        stop = (self.chars_til_now+self.offset)//81
+        start = (self.chars_til_now+self.offset)//self.line_length
+        stop = start  # if no 451 can be found
         while FILE1_R.search(line):
             # parse contents section
             if CONTENTS_R.match(line):
                 # When MF and MT change, add offset due to SEND/FEND records.
                 old_mf = mf
                 mf, mt = int(line[22:33]), int(line[33:44])
+                if old_mf != mf:
+                    start += 1
                 mt_length = int(line[44:55])
-                if old_mf == mf:
-                    start = stop + 1
-                else:
-                    start = stop + 2
                 stop = start + mt_length
-                self.mat_dict[nuc]['mfs'][mf,mt] = (81*start-self.offset,
-                                                    81*stop-self.offset)
+                self.mat_dict[nuc]['mfs'][mf, mt] = (self.line_length*start-self.offset,
+                                                     self.line_length*stop-self.offset)
+                start = stop + 1
                 line = fh.readline()
             # parse comment
             elif SPACE66_R.match(line):
@@ -160,14 +206,17 @@ class Library(rx.RxLib):
                 self.structure[nuc]['docs'].append(line[0:66])
                 line = fh.readline()
         # Find where the end of the material is and then jump to it.
-        self.chars_til_now = (stop + 4)*81 - self.offset
+        # The end is 3 lines after the last mf,mt
+        # combination (SEND, FEND, MEND)
+        self.chars_til_now = (stop + 3)*self.line_length - self.offset
         fh.seek(self.chars_til_now)
         nextline = fh.readline()
-        self.more_files = (nextline != '' and nextline[68:70] != "-1")
+        self.more_files = (nextline != '' and nextline[68:70] != '-1')
         # Update materials dict
         if mat_id != -1:
-            self.mat_dict[nuc]['end_line'] = (self.chars_til_now+self.offset)//81
-            setattr(self, "mat{0}".format(nuc), self.structure[nuc])
+            self.mat_dict[nuc]['end_line'] = \
+                (self.chars_til_now+self.offset)//self.line_length
+            setattr(self, 'mat{0}'.format(nuc), self.structure[nuc])
         self._read_mat_flags(nuc)
         fh.seek(0)
         if opened_here:
@@ -232,7 +281,7 @@ class Library(rx.RxLib):
             return self._get_cont(keys, line)
         else:
             raise ValueError('This is not a HEAD record: {}'.format(
-                    dict(zip(keys,line))))
+                dict(zip(keys, line))))
 
     def _get_list(self, headkeys, itemkeys, lines):
         """Read some lines of the array, treating it as a LIST record.
@@ -272,7 +321,7 @@ class Library(rx.RxLib):
         arraylines = (npl-1)//6 + 1
         if len(itemkeys) == 1:
             array_len = npl - (headlines-1) * 6
-            items={itemkeys[0]: lines[headlines:].flat[:array_len]}
+            items = {itemkeys[0]: lines[headlines:].flat[:array_len]}
         else:
             array_width = ((len(itemkeys)-1)//6 + 1)*6
             items_transposed = np.transpose(
@@ -285,7 +334,7 @@ class Library(rx.RxLib):
         total_lines = 1+arraylines
         return head, items, total_lines
 
-    def _get_tab1(self, headkeys, xykeys,lines):
+    def _get_tab1(self, headkeys, xykeys, lines):
         """Read some lines of the array, treating it as a TAB1 record.
 
         Parameters
@@ -317,7 +366,7 @@ class Library(rx.RxLib):
         nr, np_ = int(lines[0][4]), int(lines[0][5])
         meta_len = (nr*2-1)//6 + 1
         data_len = (np_*2-1)//6 + 1
-        intmeta = dict(zip(('intpoints','intschemes'),
+        intmeta = dict(zip(('intpoints', 'intschemes'),
                            (lines[1:1+meta_len].flat[:nr*2:2],
                             lines[1:1+meta_len].flat[1:nr*2:2])))
         intdata = dict(zip(xykeys,
@@ -367,7 +416,7 @@ class Library(rx.RxLib):
                 xs = np.append(xs[e_int < high], high_xs)
                 e_int = np.append(e_int[e_int < high], high)
         de_int = float(e_int[-1]-e_int[0])
-        return np.nansum((e_int[1:]-e_int[:-1])* (xs[1:]+xs[:-1])/2./de_int)
+        return np.nansum((e_int[1:]-e_int[:-1]) * (xs[1:]+xs[:-1])/2./de_int)
 
     def _linlog(self, e_int, xs, low, high):
         if low is not None or high is not None:
@@ -394,7 +443,8 @@ class Library(rx.RxLib):
         y2 = xs[1:]
         A = (y1-y2)/(np.log(x1/x2))
         B = y1-A*np.log(x1)
-        return np.nansum(A*(x2*np.log(x2) - x1*np.log(x1)-x2+x1) + B*(x2-x1))/de_int
+        return np.nansum(A*(x2*np.log(x2) -
+                            x1*np.log(x1)-x2+x1) + B*(x2-x1))/de_int
 
     def _loglin(self, e_int, xs, low, high):
         if low is not None or high is not None:
@@ -464,7 +514,7 @@ class Library(rx.RxLib):
         B = np.log(y2*x2/(x1*y1)) / (1/(x1-T)**0.5 - 1/(x2-T)**0.5)
         A = np.e**(B/(x1-T)**0.5)*y1*x1
         # FIXME
-        raise NotImplementedError("see docs for more details.")
+        raise NotImplementedError('see docs for more details.')
 
     def integrate_tab_range(self, intscheme, e_int, xs, low=None, high=None):
         """integrate_tab_range(intscheme, e_int, xs, low=None, high=None)
@@ -486,7 +536,7 @@ class Library(rx.RxLib):
         sigma_g : float
             The group xs.
         """
-        with np.errstate(divide="ignore", invalid="ignore"):
+        with np.errstate(divide='ignore', invalid='ignore'):
             # each of these functions returns a normalized integration
             # over the range
             return self.intdict[intscheme](e_int, xs, low, high)
@@ -496,7 +546,7 @@ class Library(rx.RxLib):
         return flags, total_lines+1
 
     def _nls_njs_loop(self, L_keys, j_keys, itemkeys, data, total_lines,
-                     range_flags, subsection_dict):
+                      range_flags, subsection_dict):
         nls = int(range_flags['NLS'])
         for nls_iter in range(nls):
             if j_keys is None:
@@ -529,16 +579,29 @@ class Library(rx.RxLib):
             Material id .
         """
         lrp = self.structure[mat_id]['matflags']['LRP']
-        if (lrp == -1 or mat_id in (-1,0)):
-            # If the LRP flag for the material is -1, there's no resonance data.
+        if (lrp == -1 or mat_id in (-1, 0)):
+            # If the LRP flag for the material is -1,
+            # there's no resonance data.
             # Also if the mat id is invalid.
+            #
+            # However other methods expects _read_res to set
+            # structur[nuc]['data'], so fill it with a single
+            # entry for mat_id and empty values:
+            self.structure[mat_id]['data'].update(
+                {mat_id: {'resolved': [],
+                          'unresolved': [],
+                          'datadocs': [],
+                          'xs': {},
+                          'output': {'channel1': [],
+                                     'channel2': []},
+                          'isotope_flags': {}}})
             pass
         else:
             # Load the resonance data.
-            mf2 = self.get_rx(mat_id,2,151).reshape(-1, 6)
+            mf2 = self.get_rx(mat_id, 2, 151).reshape(-1, 6)
 
             self.structure[mat_id]['matflags'].update(
-                self._get_head(['ZA','AWR',0,0,'NIS',0], mf2[0]))
+                self._get_head(['ZA', 'AWR', 0, 0, 'NIS', 0], mf2[0]))
             total_lines = 1
             for isotope_num in range(
                     int(self.structure[mat_id]['matflags']['NIS'])):
@@ -567,17 +630,25 @@ class Library(rx.RxLib):
         total_lines: int
             The number of lines the isotope takes up.
         """
-        isotope_flags = self._get_cont(['ZAI','ABN',0,'LFW','NER',0],
+        isotope_flags = self._get_cont(['ZAI', 'ABN', 0, 'LFW', 'NER', 0],
                                        isotope_data[0])
-        nuc_i = nucname.id(int(isotope_flags['ZAI']*10))
+        # according to endf manual, there is no specification
+        # for metastable states in ZAI
+        # if we have a LIS0 != 0 we add the state to all isotopes
+        if self.structure[mat_id]['matflags']['LIS0'] == 0:
+            nuc_i = nucname.id(int(isotope_flags['ZAI']*10))
+        else:
+            nuc_i = nucname.id(int(isotope_flags['ZAI']*10 +
+                               self.structure[mat_id]['matflags']['LIS0']))
+
         self.structure[mat_id]['data'].update(
-            {nuc_i:{'resolved':[],
-                       'unresolved':[],
-                       'datadocs':[],
-                       'xs':{},
-                       'output':{'channel1':[],
-                                 'channel2':[]},
-                       'isotope_flags': isotope_flags}})
+            {nuc_i: {'resolved': [],
+                     'unresolved': [],
+                     'datadocs': [],
+                     'xs': {},
+                     'output': {'channel1': [],
+                                'channel2': []},
+                     'isotope_flags': isotope_flags}})
         total_lines = 1
         for er in range(int(isotope_flags['NER'])):
             total_lines += self._read_subsection(isotope_data[total_lines:],
@@ -609,7 +680,7 @@ class Library(rx.RxLib):
         total_lines: int
             The number of lines the energy range subsection takes up.
         """
-        range_flags = self._get_cont(('EL','EH','LRU','LRF','NRO','NAPS'),
+        range_flags = self._get_cont(('EL', 'EH', 'LRU', 'LRF', 'NRO', 'NAPS'),
                                      subsection[0])
         total_lines = 1
         lru = int(round(range_flags['LRU']))
@@ -648,8 +719,8 @@ class Library(rx.RxLib):
         def read_kbks(nch, subsection, aj_data, total_lines):
             for ch in range(nch):
                 lbk = int(subsection[total_lines][4])
-                lbk_list_keys = {2: ('R0','R1','R2','S0','S1',0),
-                                 3: ('R0','SO','GA',0,0,0)}
+                lbk_list_keys = {2: ('R0', 'R1', 'R2', 'S0', 'S1', 0),
+                                 3: ('R0', 'SO', 'GA', 0, 0, 0)}
                 aj_data['ch{}'.format(ch)] = {'LBK': lbk}
                 ch_data = aj_data['ch{}'.format(ch)]
                 if lbk == 0:
@@ -657,18 +728,18 @@ class Library(rx.RxLib):
                 elif lbk == 1:
                     total_lines += 2
                     rbr, rbr_size = self._get_tab1(
-                        (0,0,0,0,'NR','NP'), ('e_int','RBR'),
+                        (0, 0, 0, 0, 'NR', 'NP'), ('e_int', 'RBR'),
                         subsection[total_lines:])[1:3]
                     total_lines += rbr_size
                     ch_data['RBR'] = rbr
                     rbi, rbi_size = self._get_tab1(
-                        (0,0,0,0,'NR','NP'), ('e_int','RBI'),
+                        (0, 0, 0, 0, 'NR', 'NP'), ('e_int', 'RBI'),
                         (subsection[total_lines:]))[1:3]
                     total_lines += rbi_size
                     ch_data['RBI'] = rbi
                 else:
                     ch_data, total_lines = self._cont_and_update(
-                        ch_data, ('ED','EU',0,0,'LBK',0), subsection,
+                        ch_data, ('ED', 'EU', 0, 0, 'LBK', 0), subsection,
                         total_lines)
                     ch_data, total_lines = self._cont_and_update(
                         ch_data, lbk_list_keys[lbk], subsection,
@@ -683,12 +754,12 @@ class Library(rx.RxLib):
                 total_lines += 2
                 if lps == 1:
                     psr, psr_size = self._get_tab1(
-                        (0,0,0,0,'NR','NP'), ('e_int','PSR'),
+                        (0, 0, 0, 0, 'NR', 'NP'), ('e_int', 'PSR'),
                         subsection[total_lines:])[1:3]
                     total_lines += psr_size
                     ch_data['PSR'] = psr
                     psi, psi_size = self._get_tab1(
-                        (0,0,0,0,'NR','NP'), ('e_int','PSI'),
+                        (0, 0, 0, 0, 'NR', 'NP'), ('e_int', 'PSI'),
                         (subsection[total_lines:]))[1:3]
                     total_lines += psi_size
                     ch_data['PSI'] = psi
@@ -698,90 +769,95 @@ class Library(rx.RxLib):
         lrf = int(range_flags['LRF'])
         subsection_dict = rx.DoubleSpinDict({})
         headers = [None,
-                   ('SPI','AP',0,0,'NLS',0),
-                   ('SPI','AP',0,0,'NLS',0),
-                   ('SPI','AP','LAD',0,'NLS','NLSC'),
-                   ('SPI','AP',0,0,'NLS',0),
+                   ('SPI', 'AP', 0, 0, 'NLS', 0),
+                   ('SPI', 'AP', 0, 0, 'NLS', 0),
+                   ('SPI', 'AP', 'LAD', 0, 'NLS', 'NLSC'),
+                   ('SPI', 'AP', 0, 0, 'NLS', 0),
                    None,
                    None,
-                   (0,0,'IFG','KRM','NJS','KRL')]
+                   (0, 0, 'IFG', 'KRM', 'NJS', 'KRL')]
         if range_flags['NRO'] > 0:
-            intdata, total_lines = self._get_tab1((0,0,0,0,'NR','NP'),
-                                                  ('E','AP'),
+            intdata, total_lines = self._get_tab1((0, 0, 0, 0, 'NR', 'NP'),
+                                                  ('E', 'AP'),
                                                   subsection)[1:3]
             subsection_dict['int'] = intdata
         else:
             total_lines = 0
         range_flags, total_lines = self._cont_and_update(
-                range_flags, headers[lrf], subsection, total_lines)
+            range_flags, headers[lrf], subsection, total_lines)
 
         lrf_L_keys = [None,
-                      ('AWRI','QX','L','LRX','6*NRS','NRS'),
-                      ('AWRI','QX','L','LRX','6*NRS','NRS'),
-                      ('AWRI','APL','L',0,'6*NRS','NRS'),
-                      (0,0,'L',0,'NJS',0)]
-        lrf_J_keys = [None, None, None, None, ('AJ',0,0,0,'12*NLJ','NLJ')]
+                      ('AWRI', 'QX', 'L', 'LRX', '6*NRS', 'NRS'),
+                      ('AWRI', 'QX', 'L', 'LRX', '6*NRS', 'NRS'),
+                      ('AWRI', 'APL', 'L', 0, '6*NRS', 'NRS'),
+                      (0, 0, 'L', 0, 'NJS', 0)]
+        lrf_J_keys = [None, None, None, None, ('AJ', 0, 0, 0, '12*NLJ', 'NLJ')]
         lrf_itemkeys = [None,
-                        ('ER','AJ','GT','GN','GG','GF'),
-                        ('ER','AJ','GT','GN','GG','GF'),
-                        ('ER','AJ','GN','GG','GFA','GFB'),
-                        ('DET','DWT','GRT','GIT','DEF','DWF','GRF','GIF','DEC',
-                         'DWC','GRC','GIC')]
+                        ('ER', 'AJ', 'GT', 'GN', 'GG', 'GF'),
+                        ('ER', 'AJ', 'GT', 'GN', 'GG', 'GF'),
+                        ('ER', 'AJ', 'GN', 'GG', 'GFA', 'GFB'),
+                        ('DET', 'DWT', 'GRT', 'GIT', 'DEF', 'DWF',
+                         'GRF', 'GIF', 'DEC', 'DWC', 'GRC', 'GIC')]
         if lrf == 4:
             # Adler-Adler
             bg_flags, bg, bg_size = self._get_list(
-                ('AWRI',0,'LI',0,'6*NX','NX'),
-                ('A1','A2','A3','A4','B1','B2'),
+                ('AWRI', 0, 'LI', 0, '6*NX', 'NX'),
+                ('A1', 'A2', 'A3', 'A4', 'B1', 'B2'),
                 subsection[total_lines:])
             total_lines += bg_size
             subsection_dict['bg'] = bg
 
         if lrf < 5:
             total_lines = self._nls_njs_loop(lrf_L_keys[lrf],
-                                            lrf_J_keys[lrf],
-                                            lrf_itemkeys[lrf],
-                                            subsection,
-                                            total_lines,
-                                            range_flags,
-                                            subsection_dict)
+                                             lrf_J_keys[lrf],
+                                             lrf_itemkeys[lrf],
+                                             subsection,
+                                             total_lines,
+                                             range_flags,
+                                             subsection_dict)
         if lrf == 7:
             # R-Matrix Limited Format (ENDF Manual pp. 62-67)
             # Particle pair descriptions for the whole range
             particle_pair_data, pp_size = self._get_list(
-                (0,0,'NPP',0,'12*NPP','2*NPP'),
-                ('MA','MB','ZA','ZB','IA','IB','Q','PNT','SHF','MT','PA','PB'),
+                (0, 0, 'NPP', 0, '12*NPP', '2*NPP'),
+                ('MA', 'MB', 'ZA', 'ZB', 'IA', 'IB',
+                 'Q', 'PNT', 'SHF', 'MT', 'PA', 'PB'),
                 subsection[total_lines:])[1:3]
             total_lines += pp_size
             range_flags.update(particle_pair_data)
             for aj_section in range(int(range_flags['NJS'])):
                 # Read first LIST record, with channel descriptions
                 aj_flags, ch_items, ch_size = self._get_list(
-                    ('AJ','PJ','KBK','KPS','6*NCH','NCH'),
-                    ('IPP','L','SCH','BND','APE','APT'),
+                    ('AJ', 'PJ', 'KBK', 'KPS', '6*NCH', 'NCH'),
+                    ('IPP', 'L', 'SCH', 'BND', 'APE', 'APT'),
                     subsection[total_lines:])
                 total_lines += ch_size
                 # Second LIST record, with resonance energies and widths.
                 er_flags, er_data, er_size = self._get_list(
-                    (0,0,0,'NRS','6*NX','NX'), ('ER',), subsection[total_lines:])
+                    (0, 0, 0, 'NRS', '6*NX', 'NX'), ('ER',),
+                    subsection[total_lines:])
                 total_lines += er_size
                 nch = int(aj_flags['NCH'])
                 er_array_width = (nch//6+1)*6
-                er_data = er_data['ER'].reshape(-1,er_array_width).transpose()
-                aj_data = {'ER': er_data[0], 'GAM': er_data[1:1+nch].transpose()}
+                er_data = er_data['ER'].reshape(-1, er_array_width).transpose()
+                aj_data = {'ER': er_data[0],
+                           'GAM': er_data[1:1+nch].transpose()}
                 aj_data.update(ch_items)
                 aj = aj_flags['AJ']
                 # Additional records
                 if aj_flags['KBK'] > 0:
-                    lbk_list_keys = ((),(),#('ED','EU',0,0,'LBK',0),
-                                     ('R0','R1','R2','S0','S1',0),
-                                     ('R0','SO','GA',0,0,0))
-                    total_lines = read_kbks(nch, subsection, aj_data, total_lines)
+                    lbk_list_keys = ((), (),  # ('ED','EU',0,0,'LBK',0),
+                                     ('R0', 'R1', 'R2', 'S0', 'S1', 0),
+                                     ('R0', 'SO', 'GA', 0, 0, 0))
+                    total_lines = read_kbks(nch, subsection,
+                                            aj_data, total_lines)
                 if aj_flags['KPS'] > 0:
-                    total_lines = read_kpss(nch, subsection, aj_data, total_lines)
+                    total_lines = read_kpss(nch, subsection,
+                                            aj_data, total_lines)
                 subsection_dict[aj] = aj_data
 
         el, eh = range_flags['EL'], range_flags['EH']
-        subsection_data = (el,eh,subsection_dict,range_flags)
+        subsection_data = (el, eh, subsection_dict, range_flags)
         isotope_dict = self.structure[mat_id]['data'][nuc_i]
         isotope_dict['resolved'].append(subsection_data)
         return total_lines
@@ -807,71 +883,74 @@ class Library(rx.RxLib):
         --------
         total_lines: int
         """
-        head_cont = ('SPI','AP','LSSF',0,'NLS',0)
-        has_head_cont = {(0,1): True, (1,1): False, (0,2): True, (1,2): True}
-        L_keys = {(0,1): ('AWRI',0,'L',0,'6*NJS','NJS'),
-                  (1,1): ('AWRI',0,'L',0,'NJS',0),
-                  (0,2): ('AWRI',0,'L',0,'NJS',0),
-                  (1,2): ('AWRI',0,'L',0,'NJS',0)}
-        j_keys = {(0,1): None,
-                  (1,1): (0,0,'L','MUF','NE+6',0,'D','AJ','AMUN','GN0','GG',
-                          0),
-                  (0,2): ('AJ',0,'INT',0,'6*NE+6','NE',0,0,'AMUX','AMUN',
-                      'AMUG','AMUF'),
-                  (1,2): ('AJ',0,'INT',0,'6*NE+6','NE',0,0,'AMUX','AMUN',
-                      'AMUG','AMUF')}
-        itemkeys = {(0,1): ('D','AJ','AMUN','GN0','GG',0),
-                    (1,1): ('GF',),
-                    (0,2): ('ES','D','GX','GN0','GG','GF'),
-                    (1,2): ('ES','D','GX','GN0','GG','GF')}
+        head_cont = ('SPI', 'AP', 'LSSF', 0, 'NLS', 0)
+        has_head_cont = {(0, 1): True, (1, 1): False,
+                         (0, 2): True, (1, 2): True}
+        L_keys = {(0, 1): ('AWRI', 0, 'L', 0, '6*NJS', 'NJS'),
+                  (1, 1): ('AWRI', 0, 'L', 0, 'NJS', 0),
+                  (0, 2): ('AWRI', 0, 'L', 0, 'NJS', 0),
+                  (1, 2): ('AWRI', 0, 'L', 0, 'NJS', 0)}
+        j_keys = {(0, 1): None,
+                  (1, 1): (0, 0, 'L', 'MUF', 'NE+6', 0,
+                           'D', 'AJ', 'AMUN', 'GN0', 'GG', 0),
+                  (0, 2): ('AJ', 0, 'INT', 0, '6*NE+6', 'NE',
+                           0, 0, 'AMUX', 'AMUN', 'AMUG', 'AMUF'),
+                  (1, 2): ('AJ', 0, 'INT', 0, '6*NE+6', 'NE',
+                           0, 0, 'AMUX', 'AMUN', 'AMUG', 'AMUF')}
+        itemkeys = {(0, 1): ('D', 'AJ', 'AMUN', 'GN0', 'GG', 0),
+                    (1, 1): ('GF', ),
+                    (0, 2): ('ES', 'D', 'GX', 'GN0', 'GG', 'GF'),
+                    (1, 2): ('ES', 'D', 'GX', 'GN0', 'GG', 'GF')}
 
         lfw, lrf = int(isotope_flags['LFW']), int(range_flags['LRF'])
         subsection_dict = rx.DoubleSpinDict({})
         if range_flags['NRO'] > 0:
-            tabhead,intdata,total_lines=self._get_tab1((0,0,0,0,'NR','NP'),
-                                                       ('E','AP'),
-                                                       subsection)
-            subsection_dict['int']= intdata
+            tabhead, intdata, total_lines = self._get_tab1((0, 0, 0,
+                                                            0, 'NR', 'NP'),
+                                                           ('E', 'AP'),
+                                                           subsection)
+            subsection_dict['int'] = intdata
         else:
             total_lines = 0
         if has_head_cont[(lfw, lrf)]:
             range_flags, total_lines = self._cont_and_update(
                 range_flags, head_cont, subsection, total_lines)
-        if (lfw, lrf) == (1,1):
+        if (lfw, lrf) == (1, 1):
             # Case B in ENDF manual p.70
             head_flags, es_array, lines = self._get_list(
-                ('SPI','AP','LSSF',0,'NE','NLS'),
-                ('ES',),
+                ('SPI', 'AP', 'LSSF', 0, 'NE', 'NLS'),
+                ('ES', ),
                 subsection[total_lines:])
             subsection_dict['ES'] = es_array['ES']
             total_lines += lines
             range_flags.update(head_flags)
         total_lines = self._nls_njs_loop(L_keys[(lfw, lrf)],
-                                        j_keys[(lfw, lrf)],
-                                        itemkeys[(lfw, lrf)],
-                                        subsection,
-                                        total_lines,
-                                        range_flags,
-                                        subsection_dict)
+                                         j_keys[(lfw, lrf)],
+                                         itemkeys[(lfw, lrf)],
+                                         subsection,
+                                         total_lines,
+                                         range_flags,
+                                         subsection_dict)
         el, eh = range_flags['EL'], range_flags['EH']
-        subsection_data = (el,eh,subsection_dict,range_flags)
+        subsection_data = (el, eh, subsection_dict, range_flags)
         isotope_dict = self.structure[mat_id]['data'][nuc_i]
         isotope_dict['unresolved'].append(subsection_data)
         return total_lines
 
     def _read_ap_only(self, subsection, range_flags, isotope_flags, mat_id,
                       nuc_i):
-        "Read in scattering radius when it is the only resonance data given."
+        'Read in scattering radius when it is the only resonance data given.'
         subsection_dict = {}
         if range_flags['NRO'] > 0:
-            tabhead,intdata,total_lines=self._get_tab1((0,0,0,0,'NR','NP'),
-                                                       ('E','AP'),
-                                                       subsection)
-            subsection_dict['int']= intdata
+            tabhead, intdata, total_lines = self._get_tab1((0, 0, 0, 0,
+                                                            'NR', 'NP'),
+                                                           ('E', 'AP'),
+                                                           subsection)
+            subsection_dict['int'] = intdata
         else:
             total_lines = 0
         range_flags, total_lines = self._cont_and_update(
-            range_flags, ('SPI','AP',0,0,'NLS',0), subsection, total_lines)
+            range_flags, ('SPI', 'AP', 0, 0, 'NLS', 0), subsection, total_lines)
         return total_lines
 
     def _read_xs(self, nuc, mt, nuc_i=None):
@@ -888,16 +967,19 @@ class Library(rx.RxLib):
             Isotope to find; if None, defaults to mat_id.
         """
         nuc = nucname.id(nuc)
-        if nuc_i == None:
+        if nuc_i is None:
             nuc_i = nuc
-        xsdata = self.get_rx(nuc, 3, mt).reshape(-1,6)
+        if 600 > mt > 500:
+            xsdata = self.get_rx(nuc, 23, mt).reshape(-1, 6)
+        else:
+            xsdata = self.get_rx(nuc, 3, mt).reshape(-1, 6)
         total_lines = 0
-        head_flags = self._get_head(('ZA','AWR',0,0,0,0),
+        head_flags = self._get_head(('ZA', 'AWR', 0, 0, 0, 0),
                                     xsdata[total_lines])
         total_lines += 1
         int_flags, int_data, int_size = self._get_tab1(
-            ('QM','QI',0,'LM','NR','NP'),
-            ('e_int','xs'),
+            ('QM', 'QI', 0, 'LM', 'NR', 'NP'),
+            ('e_int', 'xs'),
             xsdata[total_lines:])
         int_flags.update(head_flags)
         isotope_dict = self.structure[nuc]['data'][nuc_i]
@@ -959,7 +1041,7 @@ class Library(rx.RxLib):
         if nuc in self.structure:
             return self._read_nucmfmt(nuc, mf, mt, lines)
         else:
-            raise ValueError("Material {} does not exist.".format(nuc))
+            raise ValueError('Material {} does not exist.'.format(nuc))
 
     def _read_nucmfmt(self, nuc, mf, mt, lines):
         """Load in the data from one reaction into self.structure.
@@ -980,14 +1062,14 @@ class Library(rx.RxLib):
         """
         opened_here = False
         if isinstance(self.fh, basestring):
-            fh = open(self.fh, 'r')
+            fh = open(self.fh, 'rU')
             opened_here = True
         else:
             fh = self.fh
         try:
-            start, stop = self.mat_dict[nuc]['mfs'][mf,mt]
+            start, stop = self.mat_dict[nuc]['mfs'][mf, mt]
         except KeyError as e:
-            msg = "MT {1} not found in File {0}.".format(mf, mt)
+            msg = 'MT {1} not found in File {0}.'.format(mf, mt)
             e.args = (msg,)
             raise e
         fh.readline()
@@ -995,7 +1077,7 @@ class Library(rx.RxLib):
         if lines == 0:
             s = fh.read(stop-start)
         else:
-            s = fh.read(lines*81)
+            s = fh.read(lines*self.line_length)
         if opened_here:
             fh.close
         return fromendf_tok(s)
@@ -1042,7 +1124,7 @@ class Evaluation(object):
         if isinstance(filename_or_handle, file):
             self._fh = filename_or_handle
         else:
-            self._fh = EndfTape(filename_or_handle, 'r')
+            self._fh = EndfTape(filename_or_handle, 'rU')
         self._verbose = verbose
         self._veryverbose = False
 
@@ -1270,7 +1352,7 @@ class Evaluation(object):
         for i in range(NXC):
             items = self._get_cont_record(skipC=True)
             MF, MT, NC, MOD = items[2:6]
-            self.reaction_list.append((MF,MT,NC,MOD))
+            self.reaction_list.append((MF, MT, NC, MOD))
 
     def _read_total_nu(self):
         self._print_info(1, 452)
@@ -2396,7 +2478,7 @@ class Evaluation(object):
 
     def _get_cont_record(self, line=None, skipC=False):
         if self._veryverbose:
-            print("Get CONT record")
+            print('Get CONT record')
         if not line:
             line = self._fh.readline()
         if skipC:
@@ -2415,7 +2497,7 @@ class Evaluation(object):
         if not line:
             line = self._fh.readline()
         if self._veryverbose:
-            print("Get HEAD record")
+            print('Get HEAD record')
         ZA = int(endftod(line[:11]))
         AWR = endftod(line[11:22])
         L1 = int(line[22:33])
@@ -2427,7 +2509,7 @@ class Evaluation(object):
     def _get_list_record(self, onlyList=False):
         # determine how many items are in list
         if self._veryverbose:
-            print("Get LIST record")
+            print('Get LIST record')
         items = self._get_cont_record()
         NPL = items[4]
 
@@ -2436,7 +2518,7 @@ class Evaluation(object):
         m = 0
         for i in range((NPL-1)//6 + 1):
             line = self._fh.readline()
-            toRead = min(6,NPL-m)
+            toRead = min(6, NPL-m)
             for j in range(toRead):
                 val = endftod(line[0:11])
                 itemsList.append(val)
@@ -2449,12 +2531,12 @@ class Evaluation(object):
 
     def _get_tab1_record(self):
         if self._veryverbose:
-            print("Get TAB1 record")
+            print('Get TAB1 record')
         return Tab1.from_file(self._fh)
 
     def _get_tab2_record(self):
         if self._veryverbose:
-            print("Get TAB2 record")
+            print('Get TAB2 record')
         r = ENDFTab2Record()
         r.read(self._fh)
         return r
@@ -2462,16 +2544,16 @@ class Evaluation(object):
 
     def _print_info(self, MF, MT):
         if self._verbose:
-            print("Reading MF={0}, MT={1} {2}".format(MF, MT, label(MT)))
+            print('Reading MF={0}, MT={1} {2}'.format(MF, MT, label(MT)))
 
     def __repr__(self):
         try:
             name = self.target['zsymam'].replace(' ', '')
             library = self.info['library']
         except:
-            name = "Undetermined"
-            library = "None"
-        return "<Evaluation: {0}, {1}>".format(name, library)
+            name = 'Undetermined'
+            library = 'None'
+        return '<Evaluation: {0}, {1}>'.format(name, library)
 
 
 class Tab1(object):
@@ -2855,7 +2937,8 @@ class Reaction(object):
         self.files = []
 
     def __repr__(self):
-        return "<ENDF Reaction: MT={0}, {1}>".format(self.MT, label(self.MT))
+        return '<ENDF Reaction: MT={0}, {1}>'.format(self.MT, label(self.MT))
+
 
 
 class Resonance(object):
@@ -2868,7 +2951,8 @@ class BreitWigner(Resonance):
         pass
 
     def __repr__(self):
-        return "<Breit-Wigner Resonance: l={0.L} J={0.J} E={0.E}>".format(self)
+        return '<Breit-Wigner Resonance: l={0.L} J={0.J} E={0.E}>'.format(self)
+
 
 
 class ReichMoore(Resonance):
@@ -2876,7 +2960,8 @@ class ReichMoore(Resonance):
         pass
 
     def __repr__(self):
-        return "<Reich-Moore Resonance: l={0.L} J={0.J} E={0.E}>".format(self)
+        return '<Reich-Moore Resonance: l={0.L} J={0.J} E={0.E}>'.format(self)
+
 
 
 class AdlerAdler(Resonance):
@@ -2892,5 +2977,6 @@ class RMatrixLimited(Resonance):
 class NotFound(Exception):
     def __init__(self, value):
         self.value = value
+
     def __str__(self):
         return repr(self.value)

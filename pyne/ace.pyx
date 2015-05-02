@@ -20,7 +20,7 @@ from __future__ import division, unicode_literals
 import io
 import struct
 from warnings import warn
-from pyne.utils import VnVWarning
+from pyne.utils import QAWarning
 from collections import OrderedDict
 
 cimport numpy as np
@@ -37,7 +37,7 @@ from pyne.endf import Tab1
 from pyne._utils import fromstring_split, fromstring_token
 cdef bint NP_LE_V15 = int(np.__version__.split('.')[1]) <= 5 and np.__version__.startswith('1')
 
-warn(__name__ + " is not yet V&V compliant.", VnVWarning)
+warn(__name__ + " is not yet QA compliant.", QAWarning)
 
 def ascii_to_binary(ascii_file, binary_file):
     """Convert an ACE file in ASCII format (type 1) to binary format (type 2).
@@ -139,14 +139,16 @@ class Library(object):
         # Determine whether file is ASCII or binary
         self.f = None
         try:
-            self.f = io.open(filename, 'r')
+            self.f = io.open(filename, 'rb')
             # Grab 10 lines of the library
-            s = ''.join([self.f.readline() for i in range(10)])
+            sb = b''.join([self.f.readline() for i in range(10)])
 
             # Try to decode it with ascii
-            sd = s.decode('ascii')
+            sd = sb.decode('ascii')
 
-            # No exception so proceed with ASCII
+            # No exception so proceed with ASCII - reopen in non-binary
+            self.f.close()
+            self.f = io.open(filename, 'r')
             self.f.seek(0)
             self.binary = False
         except UnicodeDecodeError:
@@ -200,7 +202,7 @@ class Library(object):
             start_position = self.f.tell()
 
             # Check for end-of-file
-            if self.f.read(1) == '':
+            if len(self.f.read(1)) == 0:
                 return
             self.f.seek(start_position)
 
@@ -220,7 +222,9 @@ class Library(object):
             length = nxs[0]
             n_records = (length + entries - 1)//entries
 
-            # verify that we are suppossed to read this table in
+            # name is bytes, make it a string
+            name = name.decode()
+            # verify that we are supposed to read this table in
             if (table_names is not None) and (name not in table_names):
                 self.f.seek(start_position + recl_length*(n_records + 1))
                 continue
@@ -324,7 +328,8 @@ class Library(object):
 
             # verify that we are suppossed to read this table in
             if (table_names is not None) and (name not in table_names):
-                f.seek(n_bytes, 1)
+                cur = f.tell()
+                f.seek(cur + n_bytes)
                 f.readline()
                 lines = [f.readline() for i in range(13)]
                 continue
@@ -332,7 +337,8 @@ class Library(object):
             # ensure we have a valid table type
             if 0 == len(name) or name[-1] not in table_types:
                 warn("Unsupported table: " + name, RuntimeWarning)
-                f.seek(n_bytes, 1)
+                cur = f.tell()
+                f.seek(cur + n_bytes)
                 f.readline()
                 lines = [f.readline() for i in range(13)]
                 continue
@@ -342,7 +348,8 @@ class Library(object):
             if 12+n_lines < len(lines):
                 goback = sum([len(line) for line in lines[12+n_lines:]])
                 lines = lines[:12+n_lines]
-                f.seek(-goback, 1)
+                cur = f.tell()
+                f.seek(cur - goback)
 
             # get the table
             table = table_types[name[-1]](name, awr, temp)
@@ -575,7 +582,7 @@ class NeutronTable(AceTable):
         self.reactions.update(reactions)
 
         # Loop over all reactions other than elastic scattering
-        for i, reaction in enumerate(self.reactions.values()[1:]):
+        for i, reaction in enumerate(list(self.reactions.values())[1:]):
             # Copy Q values and multiplicities and determine if scattering
             # should be treated in the center-of-mass or lab system
             reaction.Q = qvalues[i]
@@ -692,7 +699,7 @@ class NeutronTable(AceTable):
         n_reactions = self.nxs[5] + 1
 
         # Angular distribution for all reactions with secondary neutrons
-        for i, reaction in enumerate(self.reactions.values()[:n_reactions]):
+        for i, reaction in enumerate(list(self.reactions.values())[:n_reactions]):
             loc = int(self.xss[self.jxs[8] + i])
 
             # Check if angular distribution data exist
@@ -723,7 +730,7 @@ class NeutronTable(AceTable):
         # determined from kinematics.
         n_reactions = self.nxs[5]
 
-        for i, reaction in enumerate(self.reactions.values()[1:n_reactions + 1]):
+        for i, reaction in enumerate(list(self.reactions.values())[1:n_reactions + 1]):
             # Determine locator for ith energy distribution
             location_start = int(self.xss[self.jxs[10] + i])
 

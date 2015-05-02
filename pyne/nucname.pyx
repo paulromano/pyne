@@ -11,8 +11,6 @@ from libcpp.string cimport string as std_string
 
 # Python imports 
 #from collections import Iterable
-from warnings import warn
-from pyne.utils import VnVWarning
 
 # local imports 
 cimport pyne.cpp_utils
@@ -22,8 +20,6 @@ import pyne.pyne_config
 from pyne cimport cpp_nucname
 cimport pyne.stlcontainers as conv
 import pyne.stlcontainers as conv
-
-warn(__name__ + " is not yet V&V compliant.", VnVWarning)
 
 #
 # Conversion dictionaries
@@ -102,7 +98,7 @@ class NucTypeError(Exception):
 
 
 #
-# Is Nuclide Function
+# Is Nuclide and Is Element Functions
 #
 
 def isnuclide(nuc):
@@ -128,10 +124,56 @@ def isnuclide(nuc):
 
     return flag
 
+def iselement(nuc):
+    """Test if nuc is a valid element.
 
+    Parameters
+    ----------
+    nuc : int or str 
+        Input element.
+
+    Returns
+    -------
+    flag : bool
+
+    """
+    if isinstance(nuc, basestring):
+        nuc_bytes = nuc.encode()
+        flag = cpp_nucname.iselement(<char *> nuc_bytes)
+    elif isinstance(nuc, int) or isinstance(nuc, long):
+        flag = cpp_nucname.iselement(<int> nuc)
+    else:
+        raise NucTypeError(nuc)
+
+    return flag
 
 def id(nuc):
     """Converts a nuclide to its identifier form (952420000).
+
+    If the input nuclide is in id form already, then this is function does no
+    work. For all other formats, the id() function provides a best-guess based
+    on a heirarchy of other formats that is used to resolve ambiguities between
+    naming conventions. For integer input the form resolution order is:
+
+        - id
+        - zz (elemental z-num only given)
+        - zzaaam
+        - cinder (aaazzzm)
+        - mcnp
+        - zzaaa
+
+    For string (or char *) input the form resolution order is as follows:
+
+        - ZZ-LL-AAAM
+        - Integer form in a string representation, uses interger resolution
+        - NIST
+        - name form
+        - Serpent
+        - LL (element symbol)
+
+    For well-defined situations where you know ahead of time what format the
+    nuclide is in, you should use the various form_to_id() functions, rather 
+    than the id() function which is meant to resolve possibly ambiquous cases.
 
     Parameters
     ----------
@@ -155,7 +197,9 @@ def id(nuc):
 
 
 def name(nuc):
-    """Converts a nuclide to its name form ('AM242M'). 
+    """Converts a nuclide to its name form ('Am242M'). The name() function 
+    first converts functions to id form using the id() function. Thus the 
+    form order resolution for id() also applies to here.
 
     Parameters
     ----------
@@ -421,7 +465,7 @@ def fluka(nuc):
 
     """
     fluka_name = cpp_nucname.fluka(nuc)
-    return fluka_name
+    return fluka_name.decode()
 
 
 def fluka_to_id(name):
@@ -438,6 +482,7 @@ def fluka_to_id(name):
         Output nuclide in identifier form.
 
     """
+    name = name.encode()
     newnuc = cpp_nucname.fluka_to_id(<char *> name)
     return newnuc
 
@@ -810,7 +855,26 @@ def id_to_state_id(nuc):
         raise NucTypeError(nuc)
     return newnuc
 
+def ensdf_to_id(nuc):
+    """
+    Converts an ENSDF style id to a PyNE nuc_id
 
+    Parameters
+    ----------
+    nuc : int
+        Input nuclide.
+
+    Returns
+    -------
+    newnuc : int
+        Output nuclide in nuc_id form.
+
+    """
+    if isinstance(nuc, basestring):
+        nuc_bytes = nuc.encode()
+        return cpp_nucname.ensdf_to_id(<char *> nuc_bytes)
+    else:
+        raise NucTypeError(nuc)
 #
 # C++ Helper Functions
 #
