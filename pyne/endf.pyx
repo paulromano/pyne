@@ -25,6 +25,7 @@ from collections import OrderedDict, Iterable
 from warnings import warn
 from math import exp, log
 from pyne.utils import VnVWarning
+import IPython
 
 cimport numpy as np
 import numpy as np
@@ -1842,7 +1843,62 @@ class Evaluation(object):
                         erange['resonances'].append(resonance)
 
         elif erange['representation'] == 'RML':
-            pass
+            items = self._get_cont_record()
+            erange['IFG'] = items[2]  # reduced width amplitude?
+            erange['KRM'] = items[3]  # Specify which formulae are used
+            n_spin_groups = items[4]  # Number of Jpi values (NJS)
+            KRL = items[5]  # Flag for non-relativistic kinematics
+
+            items, values = self._get_list_record()
+            erange['particle_pairs'] = []
+            n_pairs = items[5]//2  # Number of particle pairs (NPP)
+            for i in range(n_pairs):
+                pp = {'mass_a': values[12*i],
+                      'mass_b': values[12*i + 1],
+                      'z_a': values[12*i + 2],
+                      'z_b': values[12*i + 3],
+                      'spin_a': values[12*i + 4],
+                      'spin_b': values[12*i + 5],
+                      'q': values[12*i + 6],
+                      'pnt': values[12*i + 7],
+                      'shift': values[12*i + 8],
+                      'MT': values[12*i + 9],
+                      'parity_a': values[12*i + 10],
+                      'parity_b': values[12*i + 11]}
+                erange['particle_pairs'].append(pp)
+
+            # loop over spin groups
+            erange['spin_groups'] = []
+            for i in range(n_spin_groups):
+                sg = {'channels': []}
+                erange['spin_groups'].append(sg)
+
+                items, values = self._get_list_record()
+                J = items[0]
+                parity = items[1]
+                kbk = items[2]
+                kps = items[3]
+                n_channels = items[5]
+                for j in range(n_channels):
+                    channel = {}
+                    channel['particle_pair'] = values[6*j]
+                    channel['l'] = values[6*j + 1]
+                    channel['spin'] = values[6*j + 2]
+                    channel['boundary'] = values[6*j + 3]
+                    channel['effective_radius'] = values[6*j + 4]
+                    channel['true_radius'] = values[6*j + 5]
+                    sg['channels'].append(channel)
+
+                items, values = self._get_list_record()
+                n_resonances = items[3]
+                sg['resonance_energies'] = np.zeros(n_resonances)
+                sg['resonance_widths'] = np.zeros((n_channels, n_resonances))
+                m = n_channels//6 + 1
+                for j in range(n_resonances):
+                    sg['resonance_energies'][j] = values[m*j]
+                    for k in range(n_channels):
+                        sg['resonance_widths'][k,j] = values[m*j + k + 1]
+
 
     def _read_unresolved(self, erange, LFW, LRF):
         erange['fission_widths'] = (LFW == 1)
