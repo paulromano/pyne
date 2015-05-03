@@ -21,6 +21,7 @@ from libc.string cimport strtok, strcpy, strncpy
 
 import re
 import os
+from math import atan, sqrt, pi, cos, sin
 from collections import OrderedDict, Iterable
 from warnings import warn
 from pyne.utils import QAWarning
@@ -30,6 +31,7 @@ import numpy as np
 from numpy.polynomial.polynomial import Polynomial
 from numpy.polynomial.legendre import Legendre
 from scipy.interpolate import interp1d
+from scipy.special import wofz
 
 from pyne cimport cpp_nucname
 from pyne import nucname
@@ -1786,6 +1788,7 @@ class Evaluation(object):
                     if NIS == 1:
                         res['unresolved'] = erange
 
+                erange.material = self
                 isotope['ranges'].append(erange)
 
 
@@ -2639,6 +2642,75 @@ class Reaction(object):
         return '<ENDF Reaction: MT={0}, {1}>'.format(self.MT, label(self.MT))
 
 
+def _wave_number(A, E):
+    return 2.196807122623e-3*A/(A + 1)*sqrt(abs(E))
+
+def get_rhos(erange, A, E, l=None):
+    k = _wave_number(A, E)
+
+    # Calculate scattering radius
+    a = 0.123*(1.008664904*A)**(1.0/3.0) + 0.08
+
+    # Calculate energy-independent channel radius, possibly l-dependent
+    if l and erange.apl[l] > 0.:
+        AP = erange.apl[l]
+    else:
+        AP = erange.scattering_radius_ind
+
+    if erange.nro == 0:
+        if erange.naps == 0:
+            rho = k*a
+            rhohat = k*AP
+        elif erange.naps == 1:
+            rho = rhohat = k*AP
+    elif erange.nro == 1:
+        APE = erange.scattering_radius(E)
+        if erange.naps == 0:
+            rho = k*a
+            rhohat = k*APE
+        elif erange.naps == 1:
+            rho = rhohat = k*APE
+        elif erange.naps == 2:
+            rho = k*AP
+            rhohat = k*APE
+
+    return rho, rhohat
+
+def phaseshift(l, rho):
+    if l == 0:
+        return rho
+    elif l == 1:
+        return rho - atan(rho)
+    elif l == 2:
+        return rho - atan(3*rho/(3 - rho**2))
+    elif l == 3:
+        return rho - atan((15*rho - rho**3)/(15 - 6*rho**2))
+    elif l == 4:
+        return rho - atan((105*rho - 10*rho**3)/(105 - 45*rho**2 + rho**4))
+
+def penetration_shift(l, rho):
+    if l == 0:
+        return rho, 0.
+    elif l == 1:
+        den = 1 + rho**2
+        return rho**3/den, -1/den
+    elif l == 2:
+        den = 9 + 3*rho**2 + rho**4
+        return rho**5/den, -(18 + 3*rho**2)/den
+    elif l == 3:
+        den = 225 + 45*rho**2 + 6*rho**4 + rho**6
+        return rho**7/den, -(675 + 90*rho**2 + 6*rho**4)/den
+    elif l == 4:
+        den = 11025 + 1575*rho**2 + 135*rho**4 + 10*rho**6 + rho**8
+        return rho**9/den, -(44100 + 4725*rho**2 + 270*rho**4 + 10*rho**6)/den
+
+def psichi(theta, x):
+    z = theta/2*(x + 1j)
+    W = wofz(z)
+    s = sqrt(pi)/2*theta*W
+    return s.real, s.imag
+
+
 class ResonanceRange(object):
     def __init__(self, emin, emax, nro, naps):
         self.energy_min = emin
@@ -2656,6 +2728,36 @@ class ResonanceRange(object):
 class MultiLevelBreitWigner(ResonanceRange):
     def __init__(self, emin, emax, nro, naps):
         super(MultiLevelBreitWigner, self).__init__(emin, emax, nro, naps)
+        self._prepared = False
+
+    def _prepare_resonances(self):
+        A = self.material.target['mass']
+        for i, resonances in enumerate(self.resonances):
+            l = self.l_values[i]
+
+            for r in resonances:
+                ER = r.energy
+                # Determine penetration and shift corresponding to
+                # resonance energy
+                rho, rhohat = get_rhos(self, A, ER)
+                P, S = penetration_shift(l, rho)
+                r.penetration = P
+                r.shift = S
+
+                # Determine penetration at modified energy for
+                # competitive reaction
+                if self.competitive[i]:
+                    GX = r.width_total - (
+                        r.width_neutron + r.width_gamma + r.width_fission)
+                    E = ER + self.Q[i]*(A + 1)/A
+                    rho, rhohat = get_rhos(self, A, E)
+                    PX, SX = penetration_shift(l, rho)
+                else:
+                    GX = PX = 0.
+                r.width_competitive = GX
+                r.penetration_competitive = PX
+
+        self._prepared = True
 
     def read(self, ev):
         # Read energy-dependent scattering radius if present
@@ -2665,8 +2767,7 @@ class MultiLevelBreitWigner(ResonanceRange):
         # Other scatter radius parameters
         items = ev._get_cont_record()
         self.spin = items[0]
-        if self.nro == 0:
-            self.scattering_radius = items[1]
+        self.scattering_radius_ind = items[1]
         NLS = items[4]  # Number of l-values
 
         self.resonances = []
@@ -2686,21 +2787,173 @@ class MultiLevelBreitWigner(ResonanceRange):
             GN = values[3::6]
             GG = values[4::6]
             GF = values[5::6]
+
+            resonances = []
             for i, E in enumerate(energy):
                 resonance = Resonance()
-                resonance.E = energy[i]
-                resonance.J = spin[i]
-                resonance.GT = GT[i]
-                resonance.GN = GN[i]
-                resonance.GG = GG[i]
-                resonance.GF = GF[i]
-                self.resonances.append(resonance)
+                resonance.energy = energy[i]
+                resonance.spin = spin[i]
+                resonance.width_total = GT[i]
+                resonance.width_neutron = GN[i]
+                resonance.width_gamma = GG[i]
+                resonance.width_fission = GF[i]
+                resonances.append(resonance)
+            self.resonances.append(resonances)
+
+    def reconstruct(self, A, k, E, T):
+        if not self._prepared:
+            # Pre-calculate penetrations and shifts for resonances
+            self._prepare_resonances()
+
+        elastic = 0.
+        capture = 0.
+        fission = 0.
+        rho, rhohat = get_rhos(self, A, E)
+        I = self.spin
+
+        for i, l in enumerate(self.l_values):
+            P, S = penetration_shift(l, rho)
+            phi = phaseshift(l, rhohat)
+            cos2phi = cos(2*phi)
+            sin2phi = sin(2*phi)
+
+            # Determine shift and penetration at modified energy
+            if self.competitive[i]:
+                Q = self.Q[i]
+                rhoc, rhochat = get_rhos(self, A, E + Q*(A + 1)/A)
+                P_c, S_c = penetration_shift(l, rhoc)
+                if E + Q*(A + 1)/A < 0:
+                    P_c = 0
+
+            # Determine range of J values
+            jmin = abs(abs(I - l) - 0.5)
+            jmax = I + l + 0.5
+            nJ = int(jmax - jmin + 1)
+
+            # Determine Dl factor
+            Dl = 2*l + 1
+            g = np.zeros(nJ)
+            for ij in range(nJ):
+                j = jmin + ij
+                g[ij] = (2*j + 1)/(4*I + 2)
+                Dl -= g[ij]
+
+            s = np.zeros((nJ, 2))
+            for r in self.resonances[i]:
+                # Copy resonance parameters
+                E_r = r.energy
+                j = r.spin
+                ij = int(j - jmin)
+                gt = r.width_total
+                gn = r.width_neutron
+                gg = r.width_gamma
+                gf = r.width_fission
+                gx = r.width_competitive
+                P_r, S_r = r.penetration, r.shift
+                P_rx = r.penetration_competitive
+
+                # Calculate neutron and total width at energy E
+                gnE = P*gn/P_r
+                gtE = gnE + gg + gf
+                if gx > 0:
+                    gtE += gx*P_c/P_rx
+
+                Eprime = E_r + (S_r - S)/(2*P_r)*gn
+                x = 2*(E - Eprime)/gtE
+                f = 2*gnE/(gtE*(1 + x*x))
+                s[ij, 0] += f
+                s[ij, 1] += f*x
+                capture += f*g[ij]*gg/gtE
+                if gf > 0:
+                    fission += f*g[ij]*gf/gtE
+
+            for ij in range(nJ):
+                elastic += g[ij]*((1 - cos2phi - s[ij, 0])**2 +
+                                  (sin2phi + s[ij, 1])**2)
+
+            # Add term with Dl
+            elastic += 2*Dl*(1 - cos2phi)
+
+        capture *= 2*pi/k**2
+        fission *= 2*pi/k**2
+        elastic *= pi/k**2
+
+        return (elastic, capture, fission)
 
 
 class SingleLevelBreitWigner(MultiLevelBreitWigner):
     def __init__(self, emin, emax, nro, naps):
         super(SingleLevelBreitWigner, self).__init__(emin, emax, nro, naps)
 
+    def reconstruct(self, A, k, E, T):
+        if not self._prepared:
+            # Pre-calculate penetrations and shifts for resonances
+            self._prepare_resonances()
+
+        elastic = 0.
+        capture = 0.
+        fission = 0.
+        rho, rhohat = get_rhos(self, A, E)
+
+        for i, l in enumerate(self.l_values):
+            P, S = penetration_shift(l, rho)
+            phi = phaseshift(l, rhohat)
+            cos2phi = cos(2*phi)
+            sin2phi = sin(2*phi)
+            sinphi2 = sin(phi)**2
+
+            # Add potential scattering
+            elastic += 4*pi/k**2*(2*l + 1)*sinphi2
+
+            # Determine shift and penetration at modified energy
+            if self.competitive[i]:
+                Q = self.Q[i]
+                rhoc, rhochat = get_rhos(self, A, E + Q*(A + 1)/A)
+                P_c, S_c = penetration_shift(l, rhoc)
+                if E + Q*(A + 1)/A < 0:
+                    P_c = 0
+
+            for r in self.resonances[i]:
+                # Copy resonance parameters
+                E_r = r.energy
+                J = r.spin
+                I = self.spin
+                gt = r.width_total
+                gn = r.width_neutron
+                gg = r.width_gamma
+                gf = r.width_fission
+                gx = r.width_competitive
+                P_r, S_r = r.penetration, r.shift
+                P_rx = r.penetration_competitive
+
+                # Calculate neutron and total width at energy E
+                gnE = P*gn/P_r
+                gtE = gnE + gg + gf
+                if gx > 0:
+                    gtE += gx*P_c/P_rx
+
+                Eprime = E_r + (S_r - S)/(2*P_r)*gn
+                gJ = (2*J + 1)/(4*I + 2)
+
+                if T == 0:
+                    f = pi/k**2*gJ*gnE/((E - Eprime)**2 + gtE**2/4)
+                    elastic += f*(gnE*cos2phi - 2*gtE*sinphi2
+                                  + 2*(E - Eprime)*sin2phi)
+                    capture += f*gg
+                    if gf > 0:
+                        fission += f*gf
+                else:
+                    x = 2*(E - Eprime)/gtE
+                    theta = gtE/sqrt(4*8.6173324e-05*T*E/A)
+                    psi, chi = psichi(theta, x)
+                    f = 4*pi/k**2*gJ*gnE/gtE**2
+                    elastic += f*((cos2phi*gtE - (gtE - gnE))*psi +
+                                  sin2phi*chi*gtE)
+                    capture += f*gg*psi
+                    if gf > 0:
+                        fission += f*gf*psi
+
+        return (elastic, capture, fission)
 
 class ReichMoore(ResonanceRange):
     def __init__(self, emin, emax, nro, naps):
@@ -2714,8 +2967,7 @@ class ReichMoore(ResonanceRange):
         # Other scatter radius parameters
         items = ev._get_cont_record()
         self.spin = items[0]
-        if self.nro == 0:
-            self.scattering_radius = items[1]
+        self.scattering_radius_ind = items[1]
         self.LAD = items[3]  # Flag for angular distribution
         NLS = items[4]  # Number of l-values
         self.NLSC = items[5]  # Number of l-values for convergence
@@ -2758,8 +3010,7 @@ class AdlerAdler(ResonanceRange):
         # Other scatter radius parameters
         items = ev._get_cont_record()
         self.spin = items[0]
-        if self.nro == 0:
-            self.scattering_radius = items[1]
+        self.scattering_radius_ind = items[1]
         NLS = items[4]  # Number of l-values
 
         # Get AT, BT, AF, BF, AC, BC constants
