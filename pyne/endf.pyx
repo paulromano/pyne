@@ -30,6 +30,7 @@ cimport numpy as np
 import numpy as np
 from numpy.polynomial.polynomial import Polynomial
 from numpy.polynomial.legendre import Legendre
+from numpy.linalg import inv
 from scipy.interpolate import interp1d
 from scipy.special import wofz
 
@@ -2717,6 +2718,7 @@ class ResonanceRange(object):
         self.energy_max = emax
         self.nro = nro
         self.naps = naps
+        self._prepared = False
 
     def read(self, ev):
         raise NotImplementedError
@@ -2728,7 +2730,6 @@ class ResonanceRange(object):
 class MultiLevelBreitWigner(ResonanceRange):
     def __init__(self, emin, emax, nro, naps):
         super(MultiLevelBreitWigner, self).__init__(emin, emax, nro, naps)
-        self._prepared = False
 
     def _prepare_resonances(self):
         A = self.material.target['mass']
@@ -2959,6 +2960,19 @@ class ReichMoore(ResonanceRange):
     def __init__(self, emin, emax, nro, naps):
         super(ReichMoore, self).__init__(emin, emax, nro, naps)
 
+    def _prepare_resonances(self):
+        A = self.material.target['mass']
+        for (l, J), resonances in self.resonances.items():
+            for r in resonances:
+                # Determine penetration and shift corresponding to resonance
+                # energy
+                rho, rhohat = get_rhos(self, A, r.energy)
+                P, S = penetration_shift(l, rho)
+                r.penetration = P
+                r.shift = S
+
+        self._prepared = True
+
     def read(self, ev):
         # Read energy-dependent scattering radius if present
         if self.nro != 0:
@@ -2972,15 +2986,15 @@ class ReichMoore(ResonanceRange):
         NLS = items[4]  # Number of l-values
         self.NLSC = items[5]  # Number of l-values for convergence
 
-        self.resonances = []
+        self.resonances = {}
         self.apl = np.zeros(NLS)
         self.l_values = np.zeros(NLS)
 
         # Read resonance widths, J values, etc
-        for l in range(NLS):
+        for i in range(NLS):
             items, values = ev._get_list_record()
-            self.apl[l] = items[1]
-            self.l_values[l] = items[2]
+            self.apl[i] = items[1]
+            self.l_values[i] = l = items[2]
             energy = values[0::6]
             spin = values[1::6]
             GN = values[2::6]
@@ -2989,13 +3003,128 @@ class ReichMoore(ResonanceRange):
             GFB = values[5::6]
             for i, E in enumerate(energy):
                 resonance = Resonance()
-                resonance.E = energy[i]
-                resonance.J = spin[i]
-                resonance.GN = GN[i]
-                resonance.GG = GG[i]
-                resonance.GFA = GFA[i]
-                resonance.GFB = GFB[i]
-                self.resonances.append(resonance)
+                resonance.energy = energy[i]
+                resonance.spin = J = spin[i]
+                resonance.width_neutron = GN[i]
+                resonance.width_gamma = GG[i]
+                resonance.width_fissionA = GFA[i]
+                resonance.width_fissionB = GFB[i]
+
+                if not (l, abs(J)) in self.resonances:
+                    self.resonances[l, abs(J)] = []
+                self.resonances[l, abs(J)].append(resonance)
+
+    def reconstruct(self, A, k, E, T):
+        if not self._prepared:
+            # Pre-calculate penetrations and shifts for resonances
+            self._prepare_resonances()
+
+        # Get nuclear spin
+        I = self.spin
+
+        elastic = 0.
+        fission = 0.
+        total = 0.
+        one = np.eye(3)
+        K = np.zeros((3,3), dtype=complex)
+
+        for (i, l) in enumerate(self.l_values):
+            # Check for l-dependent scattering radius
+            rho, rhohat = get_rhos(self, A, E, l)
+
+            # Calculate shift and penetrability
+            P, S = penetration_shift(l, rho)
+
+            # Calculate phase shift
+            phi = phaseshift(l, rhohat)
+
+            # Calculate common factor on collision matrix terms
+            Ubar = np.exp(-2j*phi)
+
+            imin = abs(I - 0.5)
+            imax = I + 0.5
+
+            for s in range(int(imax - imin + 1)): # abs(I - 0.5):(I + 0.5):
+                s += imin
+                Jmin = abs(l - s)
+                Jmax = l + s
+                for J in range(int(Jmax - Jmin + 1)): #abs(l - s):(l + s):
+                    J += Jmin
+
+                    # Initialize K matrix
+                    K[:,:] = 0.0
+
+                    hasfission = False
+                    if (l,J) in self.resonances:
+                        for r in self.resonances[l,J]:
+                            # If the spin is negative assume this resonance comes
+                            # from the I - 1/2 channel and vice versa
+                            j = r.spin
+                            if l > 0:
+                                if l == I or s != abs(I - 0.5) or J != abs(abs(I - l) - 0.5):
+                                    if (j < 0 and s != abs(I - 0.5) or
+                                        j > 0 and s != I + 0.5):
+                                        continue
+
+                            # Copy resonance parameters
+                            E_r = r.energy
+                            gn = r.width_neutron
+                            gg = r.width_gamma
+                            gfa = r.width_fissionA
+                            gfb = r.width_fissionB
+                            P_r = r.penetration
+
+                            # Calculate neutron width at energy E
+                            gn = sqrt(P*gn/P_r)
+
+                            # Calculate inverse of denominator of K matrix terms
+                            E_diff = E_r - E
+                            abs_value = E_diff*E_diff + 0.25*gg*gg
+                            denominator_inverse = (E_diff + 0.5j*gg)/abs_value
+
+                            # Upper triangular portion of K matrix
+                            K[0,0] += gn*gn*denominator_inverse
+                            if gfa != 0.0 or gfb != 0.0:
+                                # Negate fission widths if necessary
+                                gfa = (-1 if gfa < 0 else 1)*sqrt(abs(gfa))
+                                gfb = (-1 if gfb < 0 else 1)*sqrt(abs(gfb))
+
+                                K[0,1] += gn*gfa*denominator_inverse
+                                K[0,2] += gn*gfb*denominator_inverse
+                                K[1,1] += gfa*gfa*denominator_inverse
+                                K[1,2] += gfa*gfb*denominator_inverse
+                                K[2,2] += gfb*gfb*denominator_inverse
+                                hasfission = True
+
+                        # multiply by factor of i/2
+                        K *= 0.5j
+
+                        # Get collision matrix
+                        gJ = (2*J + 1)/(4*I + 2)
+                        if hasfission:
+                            # Copy upper triangular portion of K to lower triangular
+                            K[1,0] = K[0,1]
+                            K[2,0] = K[0,2]
+                            K[2,1] = K[1,2]
+
+                            Imat = inv(one - K)
+                            U = Ubar*(2*Imat - one)
+                            elastic += gJ*abs(1 - U[0,0])**2
+                            fission += 4*gJ*(abs(Imat[1,0])**2 + abs(Imat[2,0])**2)
+                            total += 2*gJ*(1 - U[0,0].real)
+                        else:
+                            U = Ubar*(2*(1 - K[0,0]).conjugate()/abs(1 - K[0,0])**2 - 1)
+                            elastic += gJ*abs(1 - U)**2
+                            total += 2*gJ*(1 - U.real)
+
+        # Calculate capture as difference of other cross sections
+        capture = total - elastic - fission
+
+        elastic *= pi/k**2
+        capture *= pi/k**2
+        fission *= pi/k**2
+
+        return (elastic, capture, fission)
 
 
 class AdlerAdler(ResonanceRange):
