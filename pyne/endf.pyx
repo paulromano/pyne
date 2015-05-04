@@ -2801,15 +2801,40 @@ class MultiLevelBreitWigner(ResonanceRange):
                 resonances.append(resonance)
             self.resonances.append(resonances)
 
-    def reconstruct(self, A, k, E, T):
+    def reconstruct(self, energies, temperature=0.0):
         if not self._prepared:
             # Pre-calculate penetrations and shifts for resonances
             self._prepare_resonances()
 
+        if not isinstance(energies, Iterable):
+            energies = np.array([energies])
+
+        elastic = np.zeros_like(energies)
+        capture = np.zeros_like(energies)
+        fission = np.zeros_like(energies)
+        mat = self.material
+
+        for i, E in enumerate(energies):
+            xse, xsg, xsf = self._reconstruct(E, temperature)
+            elastic[i] = xse
+            capture[i] = xsg
+            fission[i] = xsf
+
+        elastic += mat.reactions[2].cross_section(energies)
+        capture += mat.reactions[102].cross_section(energies)
+        if mat.target['fissionable']:
+            fission += mat.reactions[18].cross_section(energies)
+
+        return (elastic, capture, fission)
+
+    def _reconstruct(self, E, T):
         elastic = 0.
         capture = 0.
         fission = 0.
+        A = self.material.target['mass']
+        k = _wave_number(A, E)
         rho, rhohat = get_rhos(self, A, E)
+        k = _wave_number
         I = self.spin
 
         for i, l in enumerate(self.l_values):
@@ -2886,7 +2911,7 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
     def __init__(self, emin, emax, nro, naps):
         super(SingleLevelBreitWigner, self).__init__(emin, emax, nro, naps)
 
-    def reconstruct(self, A, k, E, T):
+    def _reconstruct(self, A, k, E, T):
         if not self._prepared:
             # Pre-calculate penetrations and shifts for resonances
             self._prepare_resonances()
@@ -2894,7 +2919,10 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
         elastic = 0.
         capture = 0.
         fission = 0.
+        A = self.material.target['mass']
+        k = _wave_number(A, E)
         rho, rhohat = get_rhos(self, A, E)
+        I = self.spin
 
         for i, l in enumerate(self.l_values):
             P, S = penetration_shift(l, rho)
@@ -2918,7 +2946,6 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
                 # Copy resonance parameters
                 E_r = r.energy
                 J = r.spin
-                I = self.spin
                 gt = r.width_total
                 gn = r.width_neutron
                 gg = r.width_gamma
@@ -3014,7 +3041,35 @@ class ReichMoore(ResonanceRange):
                     self.resonances[l, abs(J)] = []
                 self.resonances[l, abs(J)].append(resonance)
 
-    def reconstruct(self, A, k, E, T):
+    def reconstruct(self, energies, temperature=0.0):
+        if not self._prepared:
+            # Pre-calculate penetrations and shifts for resonances
+            self._prepare_resonances()
+
+        if not isinstance(energies, Iterable):
+            energies = np.array([energies])
+
+        elastic = np.zeros_like(energies)
+        capture = np.zeros_like(energies)
+        fission = np.zeros_like(energies)
+
+        mat = self.material
+        A = self.material.target['mass']
+
+        for i, E in enumerate(energies):
+            xse, xsg, xsf = self._reconstruct(E)
+            elastic[i] = xse
+            capture[i] = xsg
+            fission[i] = xsf
+
+        elastic += mat.reactions[2].cross_section(energies)
+        capture += mat.reactions[102].cross_section(energies)
+        if mat.target['fissionable']:
+            fission += mat.reactions[18].cross_section(energies)
+
+        return (elastic, capture, fission)
+
+    def _reconstruct(self, E):
         if not self._prepared:
             # Pre-calculate penetrations and shifts for resonances
             self._prepare_resonances()
@@ -3025,6 +3080,8 @@ class ReichMoore(ResonanceRange):
         elastic = 0.
         fission = 0.
         total = 0.
+        A = self.material.target['mass']
+        k = _wave_number(A, E)
         one = np.eye(3)
         K = np.zeros((3,3), dtype=complex)
 
