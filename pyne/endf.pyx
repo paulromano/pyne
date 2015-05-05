@@ -2678,6 +2678,17 @@ def get_rhos(erange, A, E, l=None):
     return rho, rhohat
 
 def phaseshift(l, rho):
+    """Calculate hardsphere phase shift as given in ENDF-102, Equation D.13
+
+    Parameters
+    ----------
+    l : int
+        Angular momentum quantum number
+    rho : float
+        Product of the wave number and the channel radius
+
+    """
+
     if l == 0:
         return rho
     elif l == 1:
@@ -2690,6 +2701,18 @@ def phaseshift(l, rho):
         return rho - atan((105*rho - 10*rho**3)/(105 - 45*rho**2 + rho**4))
 
 def penetration_shift(l, rho):
+    """Calculate shift and penetration factors as given in ENDF-102, Equations D.11
+    and D.12.
+
+    Parameters
+    ----------
+    l : int
+        Angular momentum quantum number
+    rho : float
+        Product of the wave number and the channel radius
+
+    """
+
     if l == 0:
         return rho, 0.
     elif l == 1:
@@ -2728,6 +2751,25 @@ class ResonanceRange(object):
 
 
 class MultiLevelBreitWigner(ResonanceRange):
+
+    """Multi-level Breit-Wigner resolved resonance formalism data. This is
+    identified by LRF=2 in the ENDF-6 format.
+
+    Parameters
+    ----------
+    emin : float
+        Minimum energy of the resolved resonance range in eV
+    emax : float
+        Maximum energy of the resolved resonance range in eV
+    nro : int
+        Flag designating energy-dependence of scattering radius (NRO). A value
+        of 0 indicates it is energy-independent, a value of 1 indicates it is
+        energy-dependent.
+    naps : int
+        Flag controlling use of the channel and scattering radius (NAPS)
+
+    """
+
     def __init__(self, emin, emax, nro, naps):
         super(MultiLevelBreitWigner, self).__init__(emin, emax, nro, naps)
 
@@ -2808,6 +2850,9 @@ class MultiLevelBreitWigner(ResonanceRange):
 
         if not isinstance(energies, Iterable):
             energies = np.array([energies])
+            return_scalar = True
+        else:
+            return_scalar = False
 
         elastic = np.zeros_like(energies)
         capture = np.zeros_like(energies)
@@ -2825,7 +2870,10 @@ class MultiLevelBreitWigner(ResonanceRange):
         if mat.target['fissionable']:
             fission += mat.reactions[18].cross_section(energies)
 
-        return (elastic, capture, fission)
+        if return_scalar:
+            return(elastic[0], capture[0], fission[0])
+        else:
+            return (elastic, capture, fission)
 
     def _reconstruct(self, E, T):
         elastic = 0.
@@ -2834,7 +2882,6 @@ class MultiLevelBreitWigner(ResonanceRange):
         A = self.material.target['mass']
         k = _wave_number(A, E)
         rho, rhohat = get_rhos(self, A, E)
-        k = _wave_number
         I = self.spin
 
         for i, l in enumerate(self.l_values):
@@ -2908,10 +2955,28 @@ class MultiLevelBreitWigner(ResonanceRange):
 
 
 class SingleLevelBreitWigner(MultiLevelBreitWigner):
+    """Single-level Breit-Wigner resolved resonance formalism data. This is
+    identified by LRF=1 in the ENDF-6 format.
+
+    Parameters
+    ----------
+    emin : float
+        Minimum energy of the resolved resonance range in eV
+    emax : float
+        Maximum energy of the resolved resonance range in eV
+    nro : int
+        Flag designating energy-dependence of scattering radius (NRO). A value
+        of 0 indicates it is energy-independent, a value of 1 indicates it is
+        energy-dependent.
+    naps : int
+        Flag controlling use of the channel and scattering radius (NAPS)
+
+    """
+
     def __init__(self, emin, emax, nro, naps):
         super(SingleLevelBreitWigner, self).__init__(emin, emax, nro, naps)
 
-    def _reconstruct(self, A, k, E, T):
+    def _reconstruct(self, E, T):
         if not self._prepared:
             # Pre-calculate penetrations and shifts for resonances
             self._prepare_resonances()
@@ -2931,7 +2996,7 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
             sin2phi = sin(2*phi)
             sinphi2 = sin(phi)**2
 
-            # Add potential scattering
+            # Add potential scattering -- first term in ENDF-102, Equation D.2
             elastic += 4*pi/k**2*(2*l + 1)*sinphi2
 
             # Determine shift and penetration at modified energy
@@ -2955,19 +3020,27 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
                 P_rx = r.penetration_competitive
 
                 # Calculate neutron and total width at energy E
-                gnE = P*gn/P_r
+                gnE = P*gn/P_r  # Equation D.7
                 gtE = gnE + gg + gf
                 if gx > 0:
                     gtE += gx*P_c/P_rx
 
-                Eprime = E_r + (S_r - S)/(2*P_r)*gn
-                gJ = (2*J + 1)/(4*I + 2)
+                Eprime = E_r + (S_r - S)/(2*P_r)*gn  # Equation D.9
+                gJ = (2*J + 1)/(4*I + 2)  # Mentioned in section D.1.1.4
 
                 if T == 0:
+                    # Calculate common factor for elastic, capture, and fission
+                    # cross sections
                     f = pi/k**2*gJ*gnE/((E - Eprime)**2 + gtE**2/4)
+
+                    # Add contribution to elastic per Equation D.2
                     elastic += f*(gnE*cos2phi - 2*gtE*sinphi2
                                   + 2*(E - Eprime)*sin2phi)
+
+                    # Add contribution to capture per Equation D.3
                     capture += f*gg
+
+                    # Add contribution to fission per Equation D.6
                     if gf > 0:
                         fission += f*gf
                 else:
@@ -2984,6 +3057,24 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
         return (elastic, capture, fission)
 
 class ReichMoore(ResonanceRange):
+    """Reich-Moore resolved resonance formalism data. This is identified by LRF=3 in
+    the ENDF-6 format.
+
+    Parameters
+    ----------
+    emin : float
+        Minimum energy of the resolved resonance range in eV
+    emax : float
+        Maximum energy of the resolved resonance range in eV
+    nro : int
+        Flag designating energy-dependence of scattering radius (NRO). A value
+        of 0 indicates it is energy-independent, a value of 1 indicates it is
+        energy-dependent.
+    naps : int
+        Flag controlling use of the channel and scattering radius (NAPS)
+
+    """
+
     def __init__(self, emin, emax, nro, naps):
         super(ReichMoore, self).__init__(emin, emax, nro, naps)
 
@@ -3048,6 +3139,9 @@ class ReichMoore(ResonanceRange):
 
         if not isinstance(energies, Iterable):
             energies = np.array([energies])
+            return_scalar = True
+        else:
+            return_scalar = False
 
         elastic = np.zeros_like(energies)
         capture = np.zeros_like(energies)
@@ -3067,7 +3161,10 @@ class ReichMoore(ResonanceRange):
         if mat.target['fissionable']:
             fission += mat.reactions[18].cross_section(energies)
 
-        return (elastic, capture, fission)
+        if return_scalar:
+            return (elastic[0], capture[0], fission[0])
+        else:
+            return (elastic, capture, fission)
 
     def _reconstruct(self, E):
         if not self._prepared:
@@ -3101,11 +3198,11 @@ class ReichMoore(ResonanceRange):
             imin = abs(I - 0.5)
             imax = I + 0.5
 
-            for s in range(int(imax - imin + 1)): # abs(I - 0.5):(I + 0.5):
+            for s in range(int(imax - imin + 1)):
                 s += imin
                 Jmin = abs(l - s)
                 Jmax = l + s
-                for J in range(int(Jmax - Jmin + 1)): #abs(l - s):(l + s):
+                for J in range(int(Jmax - Jmin + 1)):
                     J += Jmin
 
                     # Initialize K matrix
@@ -3185,6 +3282,24 @@ class ReichMoore(ResonanceRange):
 
 
 class AdlerAdler(ResonanceRange):
+    """Adler-Adler resolved resonance formalism data. This is identified by LRF=4 in
+    the ENDF-6 format.
+
+    Parameters
+    ----------
+    emin : float
+        Minimum energy of the resolved resonance range in eV
+    emax : float
+        Maximum energy of the resolved resonance range in eV
+    nro : int
+        Flag designating energy-dependence of scattering radius (NRO). A value
+        of 0 indicates it is energy-independent, a value of 1 indicates it is
+        energy-dependent.
+    naps : int
+        Flag controlling use of the channel and scattering radius (NAPS)
+
+    """
+
     def __init__(self, emin, emax, nro, naps):
         super(AdlerAdler, self).__init__(emin, emax, nro, naps)
 
@@ -3243,6 +3358,24 @@ class AdlerAdler(ResonanceRange):
 
 
 class RMatrixLimited(ResonanceRange):
+    """R-Matrix Limited resolved resonance formalism data. This is identified by
+    LRF=7 in the ENDF-6 format.
+
+    Parameters
+    ----------
+    emin : float
+        Minimum energy of the resolved resonance range in eV
+    emax : float
+        Maximum energy of the resolved resonance range in eV
+    nro : int
+        Flag designating energy-dependence of scattering radius (NRO). A value
+        of 0 indicates it is energy-independent, a value of 1 indicates it is
+        energy-dependent.
+    naps : int
+        Flag controlling use of the channel and scattering radius (NAPS)
+
+    """
+
     def __init__(self, emin, emax, nro, naps):
         super(RMatrixLimited, self).__init__(emin, emax, nro, naps)
 
@@ -3419,21 +3552,13 @@ class ScatteringRadius(ResonanceRange):
         super(ScatteringRadius, self).__init__(emin, emax, nro, naps)
 
 
-
 _formalisms = {1: SingleLevelBreitWigner, 2: MultiLevelBreitWigner,
                3: ReichMoore, 4: AdlerAdler, 7: RMatrixLimited}
+
 
 class Resonance(object):
     def __init__(self):
         pass
-
-
-class BreitWigner(Resonance):
-    def __init__(self):
-        pass
-
-    def __repr__(self):
-        return '<Breit-Wigner Resonance: l={0.L} J={0.J} E={0.E}>'.format(self)
 
 
 class NotFound(Exception):
