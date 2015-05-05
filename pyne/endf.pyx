@@ -2907,12 +2907,13 @@ class MultiLevelBreitWigner(ResonanceRange):
                 if E + Q*(A + 1)/A < 0:
                     P_c = 0
 
-            # Determine range of J values
+            # Determine range of total angular momentum values based on equation
+            # 41 in LA-UR-12-27079
             jmin = abs(abs(I - l) - 0.5)
             jmax = I + l + 0.5
             nJ = int(jmax - jmin + 1)
 
-            # Determine Dl factor
+            # Determine Dl factor using Equation 43 in LA-UR-12-27079
             Dl = 2*l + 1
             g = <double *> malloc(nJ*sizeof(double))
             for ij in range(nJ):
@@ -2935,25 +2936,26 @@ class MultiLevelBreitWigner(ResonanceRange):
                 P_rx = r.penetration_competitive
 
                 # Calculate neutron and total width at energy E
-                gnE = P*gn/P_r
+                gnE = P*gn/P_r  # ENDF-102, Equation D.7
                 gtE = gnE + gg + gf
                 if gx > 0:
                     gtE += gx*P_c/P_rx
 
-                Eprime = E_r + (S_r - S)/(2*P_r)*gn
-                x = 2*(E - Eprime)/gtE
-                f = 2*gnE/(gtE*(1 + x*x))
-                s[ij][0] += f
-                s[ij][1] += f*x
+                Eprime = E_r + (S_r - S)/(2*P_r)*gn  # ENDF-102, Equation D.9
+                x = 2*(E - Eprime)/gtE    # LA-UR-12-27079, Equation 26
+                f = 2*gnE/(gtE*(1 + x*x)) # Common factor in Equation 40
+                s[ij][0] += f             # First sum in Equation 40
+                s[ij][1] += f*x           # Second sum in Equation 40
                 capture += f*g[ij]*gg/gtE
                 if gf > 0:
                     fission += f*g[ij]*gf/gtE
 
             for ij in range(nJ):
+                # Add all but last term of LA-UR-12-27079, Equation 40
                 elastic += g[ij]*((1 - cos2phi - s[ij][0])**2 +
                                   (sin2phi + s[ij][1])**2)
 
-            # Add term with Dl
+            # Add final term with Dl from Equation 40
             elastic += 2*Dl*(1 - cos2phi)
 
             # Free memory
