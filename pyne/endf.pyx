@@ -2791,7 +2791,7 @@ class MultiLevelBreitWigner(ResonanceRange):
                 # competitive reaction
                 if self.competitive[i]:
                     GX = r.width_total - (
-                        r.width_neutron + r.width_gamma + r.width_fission)
+                        r.width_neutron + r.width_gamma + r.width_fissionA)
                     E = ER + self.Q[i]*(A + 1)/A
                     rho, rhohat = get_rhos(self, A, E)
                     PX, SX = penetration_shift(l, rho)
@@ -2839,7 +2839,7 @@ class MultiLevelBreitWigner(ResonanceRange):
                 resonance.width_total = GT[i]
                 resonance.width_neutron = GN[i]
                 resonance.width_gamma = GG[i]
-                resonance.width_fission = GF[i]
+                resonance.width_fissionA = GF[i]
                 resonances.append(resonance)
             self.resonances.append(resonances)
 
@@ -2887,8 +2887,10 @@ class MultiLevelBreitWigner(ResonanceRange):
         cdef double jmin, jmax, j, Dl
         cdef double E_r, gt, gn, gg, gf, gx, P_r, S_r, P_rx
         cdef double gnE, gtE, Eprime, x, f
+        cdef double pie = pi
         cdef double *g
         cdef double (*s)[2]
+        cdef Resonance r
 
         elastic = 0.
         capture = 0.
@@ -2934,7 +2936,7 @@ class MultiLevelBreitWigner(ResonanceRange):
                 gt = r.width_total
                 gn = r.width_neutron
                 gg = r.width_gamma
-                gf = r.width_fission
+                gf = r.width_fissionA
                 gx = r.width_competitive
                 P_r, S_r = r.penetration, r.shift
                 P_rx = r.penetration_competitive
@@ -2965,9 +2967,9 @@ class MultiLevelBreitWigner(ResonanceRange):
             free(g)
             free(s)
 
-        capture *= 2*pi/k**2
-        fission *= 2*pi/k**2
-        elastic *= pi/k**2
+        capture *= 2*pie/k**2
+        fission *= 2*pie/k**2
+        elastic *= pie/k**2
 
         return (elastic, capture, fission)
 
@@ -2994,10 +2996,20 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
     def __init__(self, emin, emax, nro, naps):
         super(SingleLevelBreitWigner, self).__init__(emin, emax, nro, naps)
 
-    def _reconstruct(self, E, T):
-        if not self._prepared:
-            # Pre-calculate penetrations and shifts for resonances
-            self._prepare_resonances()
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.cdivision(True)
+    def _reconstruct(self, double E, double T):
+        cdef int i, l
+        cdef double elastic, capture, fission
+        cdef double A, k, rho, rhohat, I
+        cdef double P, S, phi, cos2phi, sin2phi, sinphi2
+        cdef double Q, rhoc, rhochat, P_c, S_c
+        cdef double E_r, J, gt, gn, gg, gf, gx, P_r, S_r, P_rx
+        cdef double gnE, gtE, Eprime, f
+        cdef double x, theta, psi, chi
+        cdef double pie = pi
+        cdef Resonance r
 
         elastic = 0.
         capture = 0.
@@ -3015,7 +3027,7 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
             sinphi2 = sin(phi)**2
 
             # Add potential scattering -- first term in ENDF-102, Equation D.2
-            elastic += 4*pi/k**2*(2*l + 1)*sinphi2
+            elastic += 4*pie/k**2*(2*l + 1)*sinphi2
 
             # Determine shift and penetration at modified energy
             if self.competitive[i]:
@@ -3032,7 +3044,7 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
                 gt = r.width_total
                 gn = r.width_neutron
                 gg = r.width_gamma
-                gf = r.width_fission
+                gf = r.width_fissionA
                 gx = r.width_competitive
                 P_r, S_r = r.penetration, r.shift
                 P_rx = r.penetration_competitive
@@ -3049,7 +3061,7 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
                 if T == 0:
                     # Calculate common factor for elastic, capture, and fission
                     # cross sections
-                    f = pi/k**2*gJ*gnE/((E - Eprime)**2 + gtE**2/4)
+                    f = pie/k**2*gJ*gnE/((E - Eprime)**2 + gtE**2/4)
 
                     # Add contribution to elastic per Equation D.2
                     elastic += f*(gnE*cos2phi - 2*gtE*sinphi2
@@ -3065,7 +3077,7 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
                     x = 2*(E - Eprime)/gtE
                     theta = gtE/sqrt(4*8.6173324e-05*T*E/A)
                     psi, chi = psichi(theta, x)
-                    f = 4*pi/k**2*gJ*gnE/gtE**2
+                    f = 4*pie/k**2*gJ*gnE/gtE**2
                     elastic += f*((cos2phi*gtE - (gtE - gnE))*psi +
                                   sin2phi*chi*gtE)
                     capture += f*gg*psi
@@ -3358,7 +3370,7 @@ class AdlerAdler(ResonanceRange):
                 AJ = items[0]
                 NLJ = items[5]
                 for res in range(NLJ):
-                    resonance = Resonance()
+                    resonance = AdlerResonance()
                     resonance.L, resonance.J = l_value, AJ
                     resonance.DET = values[12*res]
                     resonance.DWT = values[12*res + 1]
@@ -3574,7 +3586,23 @@ _formalisms = {1: SingleLevelBreitWigner, 2: MultiLevelBreitWigner,
                3: ReichMoore, 4: AdlerAdler, 7: RMatrixLimited}
 
 
-class Resonance(object):
+cdef class Resonance(object):
+    # Attributes from ENDF file
+    cdef public double energy
+    cdef public double spin
+    cdef public double width_total
+    cdef public double width_neutron
+    cdef public double width_gamma
+    cdef public double width_fissionA
+    cdef public double width_fissionB
+
+    # Calculated attributes
+    cdef public double width_competitive
+    cdef public double penetration
+    cdef public double shift
+    cdef public double penetration_competitive
+
+class AdlerResonance(object):
     def __init__(self):
         pass
 
