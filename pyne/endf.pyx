@@ -31,7 +31,6 @@ from numpy.polynomial.polynomial import Polynomial
 from numpy.polynomial.legendre import Legendre
 from numpy.linalg import inv
 from scipy.interpolate import interp1d
-from scipy.special import wofz
 cimport cython
 
 from pyne cimport cpp_nucname
@@ -2728,12 +2727,6 @@ def penetration_shift(l, rho):
         den = 11025 + 1575*rho**2 + 135*rho**4 + 10*rho**6 + rho**8
         return rho**9/den, -(44100 + 4725*rho**2 + 270*rho**4 + 10*rho**6)/den
 
-def psichi(theta, x):
-    z = theta/2*(x + 1j)
-    W = wofz(z)
-    s = sqrt(pi)/2*theta*W
-    return s.real, s.imag
-
 
 class ResonanceRange(object):
     def __init__(self, emin, emax, nro, naps):
@@ -2843,7 +2836,7 @@ class MultiLevelBreitWigner(ResonanceRange):
                 resonances.append(resonance)
             self.resonances.append(resonances)
 
-    def reconstruct(self, energies, temperature=0.0):
+    def reconstruct(self, energies):
         if not self._prepared:
             # Pre-calculate penetrations and shifts for resonances
             self._prepare_resonances()
@@ -2860,7 +2853,7 @@ class MultiLevelBreitWigner(ResonanceRange):
         mat = self.material
 
         for i, E in enumerate(energies):
-            xse, xsg, xsf = self._reconstruct(E, temperature)
+            xse, xsg, xsf = self._reconstruct(E)
             elastic[i] = xse
             capture[i] = xsg
             fission[i] = xsf
@@ -2878,7 +2871,7 @@ class MultiLevelBreitWigner(ResonanceRange):
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.cdivision(True)
-    def _reconstruct(self, double E, double T):
+    def _reconstruct(self, double E):
         cdef int i, nJ, ij, l
         cdef double elastic, capture, fission
         cdef double A, k, rho, rhohat, I
@@ -2999,7 +2992,7 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.cdivision(True)
-    def _reconstruct(self, double E, double T):
+    def _reconstruct(self, double E):
         cdef int i, l
         cdef double elastic, capture, fission
         cdef double A, k, rho, rhohat, I
@@ -3058,31 +3051,20 @@ class SingleLevelBreitWigner(MultiLevelBreitWigner):
                 Eprime = E_r + (S_r - S)/(2*P_r)*gn  # Equation D.9
                 gJ = (2*J + 1)/(4*I + 2)  # Mentioned in section D.1.1.4
 
-                if T == 0:
-                    # Calculate common factor for elastic, capture, and fission
-                    # cross sections
-                    f = pie/k**2*gJ*gnE/((E - Eprime)**2 + gtE**2/4)
+                # Calculate common factor for elastic, capture, and fission
+                # cross sections
+                f = pie/k**2*gJ*gnE/((E - Eprime)**2 + gtE**2/4)
 
-                    # Add contribution to elastic per Equation D.2
-                    elastic += f*(gnE*cos2phi - 2*gtE*sinphi2
-                                  + 2*(E - Eprime)*sin2phi)
+                # Add contribution to elastic per Equation D.2
+                elastic += f*(gnE*cos2phi - 2*gtE*sinphi2
+                              + 2*(E - Eprime)*sin2phi)
 
-                    # Add contribution to capture per Equation D.3
-                    capture += f*gg
+                # Add contribution to capture per Equation D.3
+                capture += f*gg
 
-                    # Add contribution to fission per Equation D.6
-                    if gf > 0:
-                        fission += f*gf
-                else:
-                    x = 2*(E - Eprime)/gtE
-                    theta = gtE/sqrt(4*8.6173324e-05*T*E/A)
-                    psi, chi = psichi(theta, x)
-                    f = 4*pie/k**2*gJ*gnE/gtE**2
-                    elastic += f*((cos2phi*gtE - (gtE - gnE))*psi +
-                                  sin2phi*chi*gtE)
-                    capture += f*gg*psi
-                    if gf > 0:
-                        fission += f*gf*psi
+                # Add contribution to fission per Equation D.6
+                if gf > 0:
+                    fission += f*gf
 
         return (elastic, capture, fission)
 
