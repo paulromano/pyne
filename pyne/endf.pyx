@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 """Module for parsing and manipulating data from ENDF evaluations. Currently, it
 only can read several MTs from File 1, but with time it will be expanded to
 include the entire ENDF format.
@@ -15,13 +13,14 @@ John Xia <john.danger.xia@gmail.com>.
 """
 from __future__ import print_function, division, unicode_literals
 
-from libc.stdlib cimport malloc, free
+from libc.stdlib cimport malloc, calloc, free
 from libc.stdlib cimport atof, atoi
 from libc.string cimport strtok, strcpy, strncpy
+from libc.math cimport cos, sin, sqrt, atan
 
 import re
 import os
-from math import atan, sqrt, pi, cos, sin
+from math import pi
 from collections import OrderedDict, Iterable
 from warnings import warn
 from pyne.utils import QAWarning
@@ -33,6 +32,7 @@ from numpy.polynomial.legendre import Legendre
 from numpy.linalg import inv
 from scipy.interpolate import interp1d
 from scipy.special import wofz
+cimport cython
 
 from pyne cimport cpp_nucname
 from pyne import nucname
@@ -2875,7 +2875,21 @@ class MultiLevelBreitWigner(ResonanceRange):
         else:
             return (elastic, capture, fission)
 
-    def _reconstruct(self, E, T):
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.cdivision(True)
+    def _reconstruct(self, double E, double T):
+        cdef int i, nJ, ij, l
+        cdef double elastic, capture, fission
+        cdef double A, k, rho, rhohat, I
+        cdef double P, S, phi, cos2phi, sin2phi
+        cdef double Q, rhoc, rhochat, P_c, S_c
+        cdef double jmin, jmax, j, Dl
+        cdef double E_r, gt, gn, gg, gf, gx, P_r, S_r, P_rx
+        cdef double gnE, gtE, Eprime, x, f
+        cdef double *g
+        cdef double (*s)[2]
+
         elastic = 0.
         capture = 0.
         fission = 0.
@@ -2905,13 +2919,13 @@ class MultiLevelBreitWigner(ResonanceRange):
 
             # Determine Dl factor
             Dl = 2*l + 1
-            g = np.zeros(nJ)
+            g = <double *> malloc(nJ*sizeof(double))
             for ij in range(nJ):
                 j = jmin + ij
                 g[ij] = (2*j + 1)/(4*I + 2)
                 Dl -= g[ij]
 
-            s = np.zeros((nJ, 2))
+            s = <double (*)[2]> calloc(2*nJ, sizeof(double))
             for r in self.resonances[i]:
                 # Copy resonance parameters
                 E_r = r.energy
@@ -2934,18 +2948,22 @@ class MultiLevelBreitWigner(ResonanceRange):
                 Eprime = E_r + (S_r - S)/(2*P_r)*gn
                 x = 2*(E - Eprime)/gtE
                 f = 2*gnE/(gtE*(1 + x*x))
-                s[ij, 0] += f
-                s[ij, 1] += f*x
+                s[ij][0] += f
+                s[ij][1] += f*x
                 capture += f*g[ij]*gg/gtE
                 if gf > 0:
                     fission += f*g[ij]*gf/gtE
 
             for ij in range(nJ):
-                elastic += g[ij]*((1 - cos2phi - s[ij, 0])**2 +
-                                  (sin2phi + s[ij, 1])**2)
+                elastic += g[ij]*((1 - cos2phi - s[ij][0])**2 +
+                                  (sin2phi + s[ij][1])**2)
 
             # Add term with Dl
             elastic += 2*Dl*(1 - cos2phi)
+
+            # Free memory
+            free(g)
+            free(s)
 
         capture *= 2*pi/k**2
         fission *= 2*pi/k**2
@@ -3106,7 +3124,7 @@ class ReichMoore(ResonanceRange):
 
         self.resonances = {}
         self.apl = np.zeros(NLS)
-        self.l_values = np.zeros(NLS)
+        self.l_values = np.zeros(NLS, int)
 
         # Read resonance widths, J values, etc
         for i in range(NLS):
@@ -3483,7 +3501,7 @@ class Unresolved(ResonanceRange):
                 self.scatter_radius = items[1]
             self.LSSF = items[2]
             NE, NLS = items[4:6]
-            self.l_values = np.zeros(NLS)
+            self.l_values = np.zeros(NLS, int)
             self.parameters = {}
             for ls in range(NLS):
                 items = ev._get_cont_record()
