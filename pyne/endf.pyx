@@ -3180,7 +3180,24 @@ class ReichMoore(ResonanceRange):
         else:
             return (elastic, capture, fission)
 
-    def _reconstruct(self, E):
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.cdivision(True)
+    def _reconstruct(self, double E):
+        cdef int i, l, m, n
+        cdef double elastic, capture, fission, total
+        cdef double A, k, rho, rhohat, I
+        cdef double P, S, phi
+        cdef double imin, imax, s, Jmin, Jmax, J, j
+        cdef double E_r, gn, gg, gfa, gfb, P_r
+        cdef double E_diff, abs_value, gJ
+        cdef double pie = pi
+        cdef double complex Ubar, U_, denominator_inverse
+        cdef bint hasfission
+        cdef Resonance r
+        cdef np.ndarray[double, ndim=2] one
+        cdef np.ndarray[double complex, ndim=2] K, Imat, U
+
         if not self._prepared:
             # Pre-calculate penetrations and shifts for resonances
             self._prepare_resonances()
@@ -3220,7 +3237,9 @@ class ReichMoore(ResonanceRange):
                     J += Jmin
 
                     # Initialize K matrix
-                    K[:,:] = 0.0
+                    for m in range(3):
+                        for n in range(3):
+                            K[m,n] = 0.0
 
                     hasfission = False
                     if (l,J) in self.resonances:
@@ -3265,7 +3284,9 @@ class ReichMoore(ResonanceRange):
                                 hasfission = True
 
                         # multiply by factor of i/2
-                        K *= 0.5j
+                        for m in range(3):
+                            for n in range(3):
+                                K[m,n] *= 0.5j
 
                         # Get collision matrix
                         gJ = (2*J + 1)/(4*I + 2)
@@ -3281,16 +3302,16 @@ class ReichMoore(ResonanceRange):
                             fission += 4*gJ*(abs(Imat[1,0])**2 + abs(Imat[2,0])**2)
                             total += 2*gJ*(1 - U[0,0].real)
                         else:
-                            U = Ubar*(2*(1 - K[0,0]).conjugate()/abs(1 - K[0,0])**2 - 1)
-                            elastic += gJ*abs(1 - U)**2
-                            total += 2*gJ*(1 - U.real)
+                            U_ = Ubar*(2*(1 - K[0,0]).conjugate()/abs(1 - K[0,0])**2 - 1)
+                            elastic += gJ*abs(1 - U_)**2
+                            total += 2*gJ*(1 - U_.real)
 
         # Calculate capture as difference of other cross sections
         capture = total - elastic - fission
 
-        elastic *= pi/k**2
-        capture *= pi/k**2
-        fission *= pi/k**2
+        elastic *= pie/k**2
+        capture *= pie/k**2
+        fission *= pie/k**2
 
         return (elastic, capture, fission)
 
