@@ -1258,7 +1258,7 @@ class Evaluation(object):
                 elif MT == 457:
                     self._read_decay()
                 else:
-                    self._fh.seek_section_end()
+                    self._read_radioactive_nuclide(MT)
 
             elif MF == 9:
                 # Read File 9 -- multiplicities
@@ -2045,6 +2045,50 @@ class Evaluation(object):
 
         # Skip SEND record
         self._fh.readline()
+
+    def _read_radioactive_nuclide(self, MT):
+        self._print_info(8, MT)
+
+        # Get Reaction instance
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.files.append(8)
+
+        # Get head record
+        items = self._get_head_record()
+        NS = items[4]
+        complete_chain = (items[5] == 0)
+
+        if complete_chain:
+            # If complete chain is specified here rather than in MF=8, get all
+            # levels of radionuclide and corresponding decay modes
+            rxn.radionuclide_production = []
+            for i in range(NS):
+                items, values = self._get_list_record()
+                radionuclide = {}
+                radionuclide['za'] = items[0]
+                radionuclide['excitation_energy'] = items[1]
+                radionuclide['mf_multiplicity'] = items[2]
+                radionuclide['level'] = items[3]
+                radionuclide['modes'] = []
+                for j in range(items[4]//6):
+                    mode = {}
+                    mode['half_life'] = values[6*j]
+                    mode['type'] = radiation_type(values[6*j + 1])
+                    mode['za'] = values[6*j + 2]
+                    mode['branching_ratio'] = values[6*j + 3]
+                    mode['endpoint_energy'] = values[6*j + 4]
+                    mode['chain_terminator'] = values[6*j + 5]
+                    radionuclide['modes'].append(mode)
+                rxn.radionuclide_production.append(radionuclide)
+        else:
+            items = self._get_cont_record()
+            rxn.radionuclide_production = radionuclide = {}
+            radionuclide['za'] = items[0]
+            radionuclide['excitation_energy'] = items[1]
+            radionuclide['mf_multiplicity'] = items[2]
+            radionuclide['level'] = items[3]
 
     def _read_multiplicity(self, MT):
         self._print_info(9, MT)
