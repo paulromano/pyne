@@ -1272,6 +1272,14 @@ class Evaluation(object):
                 # Photon production yield data
                 self._read_photon_production_yield(MT)
 
+            elif MF == 13:
+                # Photon production cross sections
+                self._read_photon_production_xs(MT)
+
+            elif MF == 14:
+                # Photon angular distributions
+                self._read_photon_angular_distribution(MT)
+
             elif MF == 23:
                 # photon interaction data
                 self._read_photon_interaction(MT)
@@ -2146,7 +2154,7 @@ class Evaluation(object):
             self.reactions[MT] = Reaction(MT)
         rxn = self.reactions[MT]
         rxn.files.append(12)
-        rxn.photon_yield = {}
+        rxn.photon_production['yield'] = ppyield = {}
 
         # Determine option
         items = self._get_head_record()
@@ -2154,11 +2162,11 @@ class Evaluation(object):
 
         if option == 1:
             # Multiplicities given
-            rxn.photon_yield['type'] = 'multiplicity'
+            ppyield['type'] = 'multiplicity'
             n_discrete_photon = items[4]
             if n_discrete_photon > 1:
-                items, rxn.photon_yield['total'] = self._get_tab1_record()
-            rxn.photon_yield['discrete'] = []
+                items, ppyield['total'] = self._get_tab1_record()
+            ppyield['discrete'] = []
             for k in range(n_discrete_photon):
                 y = {}
                 items, y['yield'] = self._get_tab1_record()
@@ -2166,12 +2174,12 @@ class Evaluation(object):
                 y['energy_level'] = items[1]
                 y['lp'] = items[2]
                 y['law'] = items[3]
-                rxn.photon_yield['discrete'].append(y)
+                ppyield['discrete'].append(y)
 
         elif option == 2:
             # Transition probability arrays given
-            rxn.photon_yield['type'] = 'transition'
-            rxn.photon_yield['transition'] = transition = {}
+            ppyield['type'] = 'transition'
+            ppyield['transition'] = transition = {}
 
             # Determine whether simple (LG=1) or complex (LG=2) transitions
             lg = items[3]
@@ -2185,6 +2193,97 @@ class Evaluation(object):
                 # Complex case
                 transition['conditional_probability'] = np.array(
                     values[2::lg + 1])
+
+    def _read_photon_production_xs(self, MT):
+        self._print_info(13, MT)
+
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.files.append(13)
+        rxn.photon_production['cross_section'] = ppxs = {}
+
+        # Determine option
+        items = self._get_head_record()
+        n_discrete_photon = items[4]
+        if n_discrete_photon > 1:
+            items, ppxs['total'] = self._get_tab1_record()
+        ppxs['discrete'] = []
+        for k in range(n_discrete_photon):
+            xs = {}
+            items, xs['cross_section'] = self._get_tab1_record()
+            xs['energy_photon'] = items[0]
+            xs['energy_level'] = items[1]
+            xs['lp'] = items[2]
+            xs['law'] = items[3]
+            ppxs['discrete'].append(xs)
+
+    def _read_photon_angular_distribution(self, MT):
+        self._print_info(14, MT)
+
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.files.append(14)
+        rxn.photon_production['angular_distribution'] = ppad = {}
+
+        # Determine format for angular distributions
+        items = self._get_head_record()
+        ppad['isotropic'] = (items[2] == 1)
+
+        if not ppad['isotropic']:
+            ltt = items[3]
+            n_discrete_photon = items[4]
+            n_isotropic = items[5]
+            ppad['discrete'] = []
+            for i in range(n_isotropic):
+                adist = AngularDistribution()
+                adist.type = 'isotropic'
+
+                items = self._get_cont_record()
+                adist.energy_photon = items[0]
+                adist.energy_level = items[1]
+                ppad['discrete'].append(adist)
+
+            if ltt == 1:
+                # Legendre polynomial coefficients
+                for i in range(n_isotropic, n_discrete_photon):
+                    adist = AngularDistribution()
+                    adist.type = 'legendre'
+
+                    adist.tab2 = self._get_tab2_record()
+                    adist.energy_photon = adist.tab2.params[0]
+                    adist.energy_level = adist.tab2.params[1]
+                    n_energy = adist.tab2.params[5]
+
+                    adist.energy = np.zeros(n_energy)
+                    adist.probability = []
+                    for i in range(n_energy):
+                        items, al = self._get_list_record()
+                        adist.energy[i] = items[1]
+                        coefficients = np.asarray([1.0] + al)
+                        for i in range(len(coefficients)):
+                            coefficients[i] *= (2.*i + 1.)/2.
+                        adist.probability.append(Legendre(coefficients))
+                    ppad['discrete'].append(adist)
+
+            elif ltt == 2:
+                # Tabulated probability distribution
+                for i in range(n_isotropic, n_discrete_photon):
+                    adist.type = 'tabulated'
+
+                    adist.tab2 = self._get_tab2_record()
+                    adist.energy_photon = adist.tab2.params[0]
+                    adist.energy_level = adist.tab2.params[1]
+                    n_energy = adist.tab2.params[5]
+
+                    adist.energy = np.zeros(n_energy)
+                    adist.probability = []
+                    for i in range(n_energy):
+                        params, f = self._get_tab1_record()
+                        adist.energy[i] = params[1]
+                        adist.probability.append(f)
+                    ppad['discrete'].append(adist)
 
     def _read_photon_interaction(self, MT):
         self._print_info(23, MT)
@@ -2731,6 +2830,7 @@ class Reaction(object):
     def __init__(self, MT):
         self.MT = MT
         self.files = []
+        self.photon_production = {}
 
     def __repr__(self):
         return '<ENDF Reaction: MT={0}, {1}>'.format(self.MT, label(self.MT))
