@@ -1220,37 +1220,37 @@ class Evaluation(object):
                     self._read_delayed_photon()
 
             elif MF == 2:
-                # File 2 -- Resonance parameters
+                # Resonance parameters
                 if MT == 151:
                     self._read_resonances()
                 else:
                     self._fh.seek_section_end()
 
             elif MF == 3:
-                # File 3 -- Reaction cross sections
+                # Reaction cross sections
                 self._read_reaction_xs(MT)
 
             elif MF == 4:
-                # File 4 -- Angular distributions
+                # Angular distributions
                 self._read_angular_distribution(MT)
 
             elif MF == 5:
-                # File 5 -- Energy distributions
+                # Energy distributions
                 self._read_energy_distribution(MT)
 
             elif MF == 6:
-                # File 6 -- Product energy-angle distributions
+                # Product energy-angle distributions
                 self._read_product_energy_angle(MT)
 
             elif MF == 7:
-                # File 7 -- Thermal scattering data
+                # Thermal scattering data
                 if MT == 2:
                     self._read_thermal_elastic()
                 if MT == 4:
                     self._read_thermal_inelastic()
 
             elif MF == 8:
-                # Read File 8 -- decay and fission yield data
+                # decay and fission yield data
                 if MT == 454:
                     self._read_independent_yield()
                 elif MT == 459:
@@ -1261,13 +1261,16 @@ class Evaluation(object):
                     self._read_radioactive_nuclide(MT)
 
             elif MF == 9:
-                # Read File 9 -- multiplicities
+                # multiplicities
                 self._read_multiplicity(MT)
 
             elif MF == 10:
-                # Read File 10 -- cross sections for production of
-                # radioactive nuclides
+                # cross sections for production of radioactive nuclides
                 self._read_production_xs(MT)
+
+            elif MF == 12:
+                # Photon production yield data
+                self._read_photon_production_yield(MT)
 
             elif MF == 23:
                 # photon interaction data
@@ -2135,6 +2138,53 @@ class Evaluation(object):
             LFS = params[3]  # Level number of the nuclide
             rxn.production[LFS] = {'QM': QM, 'QI': QI, 'ZA': IZAP,
                                    'values': state}
+
+    def _read_photon_production_yield(self, MT):
+        self._print_info(12, MT)
+
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.files.append(12)
+        rxn.photon_yield = {}
+
+        # Determine option
+        items = self._get_head_record()
+        option = items[2]
+
+        if option == 1:
+            # Multiplicities given
+            rxn.photon_yield['type'] = 'multiplicity'
+            n_discrete_photon = items[4]
+            if n_discrete_photon > 1:
+                items, rxn.photon_yield['total'] = self._get_tab1_record()
+            rxn.photon_yield['discrete'] = []
+            for k in range(n_discrete_photon):
+                y = {}
+                items, y['yield'] = self._get_tab1_record()
+                y['energy_photon'] = items[0]
+                y['energy_level'] = items[1]
+                y['lp'] = items[2]
+                y['law'] = items[3]
+                rxn.photon_yield['discrete'].append(y)
+
+        elif option == 2:
+            # Transition probability arrays given
+            rxn.photon_yield['type'] = 'transition'
+            rxn.photon_yield['transition'] = transition = {}
+
+            # Determine whether simple (LG=1) or complex (LG=2) transitions
+            lg = items[3]
+
+            # Get transition data
+            items, values = self._get_list_record()
+            transition['energy_start'] = items[0]
+            transition['energies'] = np.array(values[::lg + 1])
+            transition['direct_probability'] = np.array(values[1::lg + 1])
+            if lg == 2:
+                # Complex case
+                transition['conditional_probability'] = np.array(
+                    values[2::lg + 1])
 
     def _read_photon_interaction(self, MT):
         self._print_info(23, MT)
