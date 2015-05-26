@@ -1280,6 +1280,10 @@ class Evaluation(object):
                 # Photon angular distributions
                 self._read_photon_angular_distribution(MT)
 
+            elif MF == 15:
+                # Photon continuum energy distributions
+                self._read_photon_energy_distribution(MT)
+
             elif MF == 23:
                 # photon interaction data
                 self._read_photon_interaction(MT)
@@ -2284,6 +2288,42 @@ class Evaluation(object):
                         adist.energy[i] = params[1]
                         adist.probability.append(f)
                     ppad['discrete'].append(adist)
+
+    def _read_photon_energy_distribution(self, MT):
+        self._print_info(15, MT)
+
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.files.append(15)
+        rxn.photon_production['energy_distribution'] = pped = []
+
+        # Read HEAD record
+        items = self._get_head_record()
+        nc = items[4]
+
+        for i in range(nc):
+            edist = EnergyDistribution()
+
+            # Read TAB1 record for p(E)
+            params, applicability = self._get_tab1_record()
+            lf = params[3]
+            if lf == 1:
+                # Arbitrary tabulated function -- only format currently
+                # available in ENDF-102 for photon continuum
+                tab2 = self._get_tab2_record()
+                n_energies = tab2.params[5]
+
+                energy = np.zeros(n_energies)
+                pdf = []
+                for j in range(n_energies):
+                    params, func = self._get_tab1_record()
+                    energy[j] = params[1]
+                    pdf.append(func)
+                edist = ArbitraryTabulated(energy, pdf)
+
+            edist.applicability = applicability
+            pped.append(edist)
 
     def _read_photon_interaction(self, MT):
         self._print_info(23, MT)
