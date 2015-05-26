@@ -1288,6 +1288,10 @@ class Evaluation(object):
                 # photon interaction data
                 self._read_photon_interaction(MT)
 
+            elif MF == 26:
+                # secondary distributions for photon interactions
+                self._read_electron_products(MT)
+
             elif MF == 27:
                 # atomic form factors or scattering functions
                 self._read_scattering_functions(MT)
@@ -2357,6 +2361,66 @@ class Evaluation(object):
 
         # Skip SEND record
         self._fh.readline()
+
+    def _read_electron_products(self, MT):
+        self._print_info(26, MT)
+
+        if MT not in self.reactions:
+            self.reactions[MT] = Reaction(MT)
+        rxn = self.reactions[MT]
+        rxn.files.append(26)
+
+        # Read HEAD record
+        items = self._get_head_record()
+        n_products = items[4]
+
+        rxn.products = []
+        for i in range(n_products):
+            product = {}
+            rxn.products.append(product)
+
+            # Read TAB1 record for product yield
+            params, product['yield'] = self._get_tab1_record()
+            product['za'] = params[0]
+            product['law'] = params[3]
+
+            if product['law'] == 1:
+                # Continuum energy-angle distribution
+                tab2 = self._get_tab2_record()
+                product['lang'] = tab2.params[2]
+                product['lep'] = tab2.params[3]
+                ne = tab2.params[5]
+                product['energy'] = np.zeros(ne)
+                product['n_discrete_energies'] = np.zeros(ne)
+                product['energy_out'] = []
+                product['b'] = []
+                for i in range(ne):
+                    items, values = self._get_list_record()
+                    product['energy'][i] = items[1]
+                    product['n_discrete_energies'][i] = items[2]
+                    n_angle = items[3]
+                    n_energy_out = items[5]
+                    values = np.array(values)
+                    values.shape = (n_energy_out, n_angle + 2)
+                    product['energy_out'].append(values[:,0])
+                    product['b'].append(values[:,1:])
+
+            elif product['law'] == 2:
+                # Discrete two-body scattering
+                tab2 = self._get_tab2_record()
+                ne = tab2.params[5]
+                product['energy'] = np.zeros(ne)
+                product['lang'] = np.zeros(ne, dtype=int)
+                product['Al'] = []
+                for i in range(ne):
+                    items, values = self._get_list_record()
+                    product['energy'][i] = items[1]
+                    product['lang'][i] = items[2]
+                    product['Al'].append(np.asarray(values))
+
+            elif product['law'] == 8:
+                # Energy transfer for excitation
+                params, product['energy_transfer'] = self._get_tab1_record()
 
     def _read_scattering_functions(self, MT):
         self._print_info(27, MT)
