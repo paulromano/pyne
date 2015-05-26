@@ -1674,8 +1674,20 @@ class Evaluation(object):
                 product['lang'] = tab2.params[2]
                 product['lep'] = tab2.params[3]
                 ne = tab2.params[5]
+                product['energy'] = np.zeros(ne)
+                product['n_discrete_energies'] = np.zeros(ne)
+                product['energy_out'] = []
+                product['b'] = []
                 for i in range(ne):
                     items, values = self._get_list_record()
+                    product['energy'][i] = items[1]
+                    product['n_discrete_energies'][i] = items[2]
+                    n_angle = items[3]
+                    n_energy_out = items[5]
+                    values = np.array(values)
+                    values.shape = (n_energy_out, n_angle + 2)
+                    product['energy_out'].append(values[:,0])
+                    product['b'].append(values[:,1:])
 
             elif product['law'] == 2:
                 # Discrete two-body scattering
