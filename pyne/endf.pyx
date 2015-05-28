@@ -3799,6 +3799,22 @@ class RMatrixLimited(ResonanceRange):
                 for k in range(n_channels):
                     sg['resonance_widths'][k,j] = values[m*j + k + 1]
 
+            # Optional extension (Background R-Matrix)
+            if kbk > 0:
+                items, values = ev._get_list_record()
+                lbk = items[4]
+                if lbk == 1:
+                    params, rbr = ev._get_tab1_record()
+                    params, rbi = ev._get_tab1_record()
+
+            # Optional extension (Tabulated phase shifts)
+            if kps > 0:
+                items, values = ev._get_list_record()
+                lps = items[4]
+                if lps == 1:
+                    params, psr = ev._get_tab1_record()
+                    params, psi = ev._get_tab1_record()
+
 
 class Unresolved(ResonanceRange):
     def __init__(self, emin, emax, nro, naps):
