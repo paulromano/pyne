@@ -1709,25 +1709,43 @@ class Evaluation(object):
             elif product['law'] == 5:
                 # Charged particle elastic scattering
                 tab2 = self._get_tab2_record()
+                product['spin'] = tab2.params[0]
+                product['identical'] = (tab2.params[2] == 1)
                 ne = tab2.params[5]
+                product['energies'] = np.zeros(ne)
+                product['ltp'] = np.zeros(ne, dtype=int)
+                product['coefficients'] = []
                 for i in range(ne):
                     items, values = self._get_list_record()
+                    product['energies'][i] = items[1]
+                    product['lpt'][i] = items[2]
+                    product['coefficients'].append(values)
 
             elif product['law'] == 6:
                 # N-body phase-space distribution
                 items = self._get_cont_record()
-                product['apsx'] = items[0]
-                product['npsx'] = items[5]
+                product['total_mass'] = items[0]
+                product['n_particles'] = items[5]
 
             elif product['law'] == 7:
                 # Laboratory energy-angle distribution
                 tab2 = self._get_tab2_record()
                 ne = tab2.params[5]
+                product['energies'] = np.zeros(ne)
+                product['mu'] = []
+                product['distribution'] = []
                 for i in range(ne):
                     tab2mu = self._get_tab2_record()
+                    product['energies'][i] = tab2mu.params[1]
                     nmu = tab2mu.params[5]
+                    mu = np.zeros(nmu)
+                    dists = []
                     for j in range(nmu):
                         params, f = self._get_tab1_record()
+                        mu[j] = params[1]
+                        dists.append(f)
+                    product['mu'].append(mu)
+                    product['distribution'].append(dists)
 
     def _read_delayed_photon(self):
         self._print_info(1, 460)
