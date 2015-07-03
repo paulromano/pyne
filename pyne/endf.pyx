@@ -2742,6 +2742,52 @@ class Tab1(object):
 
         return y if iterable else y[0]
 
+    def integral(self):
+        # Create output array
+        partial_sum = np.zeros(len(self.x) - 1)
+
+        i_low = 0
+        for k in range(len(self.nbt)):
+            # Determine which x values are within this interpolation range
+            i_high = self.nbt[k] - 1
+
+            # Get x values and bounding (x,y) pairs
+            x0 = self.x[i_low:i_high]
+            x1 = self.x[i_low + 1:i_high + 1]
+            y0 = self.y[i_low:i_high]
+            y1 = self.y[i_low + 1:i_high + 1]
+
+            if self.interp[k] == 1:
+                # Histogram
+                partial_sum[i_low:i_high] = y0*(x1 - x0)
+
+            elif self.interp[k] == 2:
+                # Linear-linear
+                m = (y1 - y0)/(x1 - x0)
+                partial_sum[i_low:i_high] = (y0 - m*x0)*(x1 - x0) + \
+                                            m*(x1**2 - x0**2)/2
+
+            elif self.interp[k] == 3:
+                # Linear-log
+                logx = np.log(x1/x0)
+                m = (y1 - y0)/logx
+                partial_sum[i_low:i_high] = y0 + m*(x1*(logx - 1) + x0)
+
+            elif self.interp[k] == 4:
+                # Log-linear
+                m = np.log(y1/y0)/(x1 - x0)
+                partial_sum[i_low:i_high] = y0/m*(np.exp(m*(x1 - x0)) - 1)
+
+            elif self.interp[k] == 5:
+                # Log-log
+                m = np.log(y1/y0)/np.log(x1/x0)
+                partial_sum[i_low:i_high] = y0/((m + 1)*x0**m)*(
+                    x1**(m + 1) - x0**(m + 1))
+
+            i_low = i_high
+
+        return np.concatenate(([0.], np.cumsum(partial_sum)))
+
 
 class EnergyDistribution(object):
     def __init__(self):
