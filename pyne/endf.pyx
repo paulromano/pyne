@@ -2485,7 +2485,7 @@ class Evaluation(object):
              subi = subshells[int(params[0])]
              n_transitions = int(params[5])
              ebi = list_items[0]
-             eln = int(list_items[1])
+             eln = list_items[1]
              data = {'binding_energy': ebi, 'number_electrons': eln, 'transitions': []}
              for j in range(n_transitions):
                  subj = subshells[int(list_items[6*(j+1)])]
